@@ -47,7 +47,6 @@ function obterHorario() {
         minute: "2-digit",
         second: "2-digit"
     });
-
 }
 
 
@@ -58,12 +57,10 @@ function obterHorario() {
 function salvarDados() {
 
     localStorage.setItem(CHAVE_ATUAL, senhaAtual);
-
     localStorage.setItem(
         CHAVE_HISTORICO,
         JSON.stringify(historico)
     );
-
 }
 
 
@@ -74,10 +71,8 @@ function salvarDados() {
 function atualizarSenha() {
 
     elementoSenhaAtual.textContent = senhaAtual || "---";
-
     elementoContador.textContent =
         `${historico.length} / ${LIMITE_HISTORICO}`;
-
 }
 
 
@@ -96,18 +91,14 @@ function atualizarHistorico() {
 
         item.className = "historico-vazio";
         item.textContent = "Nenhuma senha chamada ainda.";
-
         elementoHistorico.appendChild(item);
-
         return;
-
     }
 
     // Exibe as senhas da mais recente para a mais antiga
     historico.forEach((registro) => {
 
         const item = document.createElement("li");
-
         const numero = document.createElement("span");
 
         numero.className = "historico-senha";
@@ -122,9 +113,7 @@ function atualizarHistorico() {
         item.appendChild(horario);
 
         elementoHistorico.appendChild(item);
-
     });
-
 }
 
 
@@ -150,9 +139,7 @@ function reproduzirSom() {
             console.warn("Web Audio API não disponível.");
             return;
         }
-
         contextoAudio = new AudioContext();
-
     }
 
     // Alguns navegadores exigem interação do usuário
@@ -215,9 +202,7 @@ function chamarSenha(novaSenha, horario = obterHorario()) {
 
         elementoMensagem.textContent =
             "Senha inválida. Utilize até 4 dígitos.";
-
         return false;
-
     }
 
     // Evita registrar novamente a mesma senha atual
@@ -227,7 +212,6 @@ function chamarSenha(novaSenha, horario = obterHorario()) {
 
     // Se já existe uma senha atual, ela vai para o histórico
     if (senhaAtual !== "") {
-
         historico.unshift({
             senha: senhaAtual,
             horario: obterHorario()
@@ -263,7 +247,6 @@ function chamarSenha(novaSenha, horario = obterHorario()) {
     reproduzirSom();
 
     return true;
-
 }
 
 
@@ -282,9 +265,7 @@ function gerarSenhaTeste() {
     if (proximaSenha > 9999) {
         proximaSenha = 1;
     }
-
     return senha;
-
 }
 
 
@@ -295,9 +276,7 @@ function gerarSenhaTeste() {
 elementoBotao.addEventListener("click", () => {
 
     const novaSenha = gerarSenhaTeste();
-
     chamarSenha(novaSenha);
-
 });
 
 
@@ -308,15 +287,10 @@ elementoBotao.addEventListener("click", () => {
 elementoSom.addEventListener("change", () => {
 
     if (elementoSom.checked) {
-
         elementoMensagem.textContent = "Som ativado.";
-
     } else {
-
         elementoMensagem.textContent = "Som desativado.";
-
     }
-
 });
 
 
@@ -325,14 +299,11 @@ elementoSom.addEventListener("change", () => {
 ========================================= */
 
 function atualizarRelogio() {
-
     elementoRelogio.textContent = obterHorario();
-
 }
 
 // Atualiza o relógio a cada segundo
 setInterval(atualizarRelogio, 1000);
-
 
 /* =========================================
    INTEGRAÇÃO FUTURA COM ESP32
@@ -372,20 +343,14 @@ async function consultarSenhaESP32() {
         const dados = await resposta.json();
 
         if (dados.senha !== undefined) {
-
             chamarSenha(
                 dados.senha,
                 dados.horario || obterHorario()
             );
-
         }
-
     } catch (erro) {
-
         console.error("Erro ao consultar ESP32:", erro);
-
     }
-
 }
 
 
@@ -408,42 +373,28 @@ function conectarWebSocket(endereco) {
     };
 
     conexaoESP32.onmessage = (evento) => {
-
         try {
-
             const dados = JSON.parse(evento.data);
-
             if (dados.senha !== undefined) {
-
                 chamarSenha(
                     dados.senha,
                     dados.horario || obterHorario()
                 );
-
             }
-
         } catch (erro) {
-
             console.error("Mensagem inválida:", erro);
-
         }
-
     };
 
     conexaoESP32.onclose = () => {
-
         console.log("Conexão com ESP32 encerrada.");
 
     };
 
     conexaoESP32.onerror = (erro) => {
-
         console.error("Erro WebSocket:", erro);
-
     };
-
 }
-
 
 /* =========================================
    INICIALIZAÇÃO
@@ -451,7 +402,5 @@ function conectarWebSocket(endereco) {
 
 // Restaura a interface quando a página abre
 atualizarSenha();
-
 atualizarHistorico();
-
 atualizarRelogio();
