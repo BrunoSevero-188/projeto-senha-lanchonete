@@ -1,0 +1,102 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta name="theme-color" content="#101827">
+
+    <title>Painel de Senhas | Lanchonete</title>
+
+    <!-- Arquivo de estilos -->
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <main class="painel">
+
+        <!-- Cabeçalho -->
+        <header class="cabecalho">
+            <div>
+                <span class="identificador">PAINEL DE ATENDIMENTO</span>
+                <h1>Senha Atual</h1>
+                <p>Acompanhe as chamadas dos pedidos.</p>
+            </div>
+
+            <div class="status">
+                <span class="status-indicador"></span>
+                <span>Sistema ativo</span>
+            </div>
+        </header>
+
+        <!-- Área principal da senha -->
+        <section class="senha-atual" aria-live="assertive"
+                 aria-atomic="true">
+
+            <span class="legenda">SENHA CHAMADA</span>
+
+            <div id="senhaAtual" class="numero-senha">
+                ---
+            </div>
+
+            <p id="mensagem" class="mensagem">
+                Aguardando próxima chamada...
+            </p>
+
+        </section>
+
+        <!-- Histórico -->
+        <section class="historico">
+
+            <div class="historico-cabecalho">
+                <div>
+                    <span class="identificador">ACOMPANHAMENTO</span>
+                    <h2>Últimas senhas</h2>
+                </div>
+
+                <span class="contador" id="contador">
+                    0 / 5
+                </span>
+            </div>
+
+            <ul id="listaHistorico" class="lista-historico"
+                aria-label="Histórico das últimas cinco senhas">
+
+                <li class="historico-vazio">
+                    Nenhuma senha chamada ainda.
+                </li>
+
+            </ul>
+
+        </section>
+
+        <!-- Controles de teste -->
+        <section class="controles">
+
+            <button id="btnChamar" class="botao-chamar">
+                <span>🔔</span>
+                Chamar senha
+            </button>
+
+            <label class="controle-som">
+                <input type="checkbox" id="somAtivo" checked>
+                <span>Som ativado</span>
+            </label>
+
+        </section>
+
+        <!-- Rodapé -->
+        <footer class="rodape">
+            <span>Sistema de Senhas</span>
+            <span id="relogio">--:--:--</span>
+        </footer>
+
+    </main>
+
+    <!-- Arquivo JavaScript -->
+    <script src="script.js"></script>
+
+</body>
+</html>
