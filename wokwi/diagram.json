@@ -87,8 +87,8 @@
     [ "esp:GND.2", "led2:C", "red", [ "v-28.8", "h19.2", "v201.6" ] ]
   ],
   "dependencies": {
-    "fdebrabander/LiquidCrystal_I2C": "1.1.2",
-    "markstanley/Keypad": "3.1.1",
-    "bblanchon/ArduinoJson": "7.2.0"
+    "LiquidCrystal_I2C": "1.1.2",
+    "Keypad": "3.1.1",
+    "ArduinoJson": "7.2.0"
   }
 }
