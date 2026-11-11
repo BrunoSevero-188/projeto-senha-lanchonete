@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "author": "BrunoSevero-188",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-devkit-c-v4",
+      "id": "esp",
+      "top": -739.2,
+      "left": -110.36,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-lcd1602",
+      "id": "lcd1",
+      "top": -752,
+      "left": 111.2,
+      "attrs": { "pins": "i2c" }
+    },
+    {
+      "type": "wokwi-membrane-keypad",
+      "id": "keypad1",
+      "top": -1000.4,
+      "left": -436,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led1",
+      "top": -601,
+      "left": 54.6,
+      "rotate": 90,
+      "attrs": { "color": "green", "flip": "1" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": -716.05,
+      "left": 19.2,
+      "attrs": { "value": "4700" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r2",
+      "top": -735.25,
+      "left": 19.2,
+      "attrs": { "value": "4700" }
+    },
+    {
+      "type": "wokwi-buzzer",
+      "id": "bz1",
+      "top": -871.2,
+      "left": -94.2,
+      "attrs": { "volume": "0.1" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led2",
+      "top": -567.2,
+      "left": 54.6,
+      "rotate": 90,
+      "attrs": { "color": "red", "flip": "1" }
+    }
+  ],
+  "connections": [
+    [ "esp:TX", "$serialMonitor:RX", "", [] ],
+    [ "esp:RX", "$serialMonitor:TX", "", [] ],
+    [ "lcd1:SDA", "r1:2", "green", [ "h0" ] ],
+    [ "r1:1", "esp:22", "green", [ "v0" ] ],
+    [ "lcd1:SCL", "r2:2", "green", [ "h0" ] ],
+    [ "r2:1", "esp:23", "green", [ "h-19.2", "v28.8" ] ],
+    [ "lcd1:VCC", "esp:3V3", "#8f4814", [ "h-28.8", "v-38.3", "h-192", "v38.4" ] ],
+    [ "lcd1:GND", "esp:GND.3", "red", [ "h-28.8", "v76.8" ] ],
+    [ "esp:13", "keypad1:R1", "green", [ "h0" ] ],
+    [ "keypad1:R2", "esp:12", "green", [ "v0" ] ],
+    [ "esp:14", "keypad1:R3", "green", [ "h0" ] ],
+    [ "keypad1:R4", "esp:27", "green", [ "v0" ] ],
+    [ "keypad1:C1", "esp:26", "green", [ "v0" ] ],
+    [ "esp:25", "keypad1:C2", "green", [ "v0", "h-191.85" ] ],
+    [ "keypad1:C3", "esp:33", "green", [ "v19.2", "h-0.15" ] ],
+    [ "esp:32", "keypad1:C4", "green", [ "h0" ] ],
+    [ "bz1:1", "esp:18", "blue", [ "v28.8", "h163.2", "v124.8" ] ],
+    [ "esp:GND.1", "bz1:2", "red", [ "h-28.65", "v-182.4", "h67.2" ] ],
+    [ "esp:19", "led1:A", "green", [ "h28.8", "v67.2" ] ],
+    [ "esp:GND.2", "led1:C", "red", [ "v-28.8", "h19.2", "v150.8" ] ],
+    [ "led2:A", "esp:21", "green", [ "h-38.4", "v-115.2" ] ],
+    [ "esp:GND.2", "led2:C", "red", [ "v-28.8", "h19.2", "v201.6" ] ]
+  ],
+  "dependencies": {
+    "LiquidCrystal_I2C": "1.1.2",
+    "Keypad": "3.1.1",
+    "ArduinoJson": "7.2.0"
+  }
+}

@@ -1,0 +1,391 @@
+================================================================================
+SISTEMA DE SENHAS - LANCHONETE (ESP32)
+Códigos para a Parte Física do Projeto
+================================================================================
+
+ESTRUTURA DE ARQUIVOS:
+----------------------
+projeto-senha-lanchonete/
+├── esp32/
+│   └── main.ino          # Código principal do ESP32
+├── wokwi/
+│   ├── diagram.json      # Diagrama de conexões para simulação Wokwi
+│   └── libraries.txt     # Bibliotecas necessárias
+└── web/                  # Interface web (já existe no GitHub)
+    ├── index.html
+    ├── style.css
+    └── script.js
+
+
+================================================================================
+1. CONEXÕES FÍSICAS (HARDWARE)
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        ESP32 DevKit V1 - PINOUT                             │
+├──────────────────┬──────────────────────────────────────────────────────────┤
+│ Componente       │ Pino ESP32                                               │
+├──────────────────┼──────────────────────────────────────────────────────────┤
+│ LCD I2C SDA      │ GPIO 22  (com resistor pull-up 4.7k para 3V3)           │
+│ LCD I2C SCL      │ GPIO 23  (com resistor pull-up 4.7k para 3V3)           │
+│ LCD VCC          │ 3V3                                                      │
+│ LCD GND          │ GND                                                      │
+├──────────────────┼──────────────────────────────────────────────────────────┤
+│ Keypad R1 (Linha 1) │ GPIO 13                                               │
+│ Keypad R2 (Linha 2) │ GPIO 12                                               │
+│ Keypad R3 (Linha 3) │ GPIO 14                                               │
+│ Keypad R4 (Linha 4) │ GPIO 27                                               │
+│ Keypad C1 (Col 1)   │ GPIO 26                                               │
+│ Keypad C2 (Col 2)   │ GPIO 25                                               │
+│ Keypad C3 (Col 3)   │ GPIO 33                                               │
+│ Keypad C4 (Col 4)   │ GPIO 32                                               │
+├──────────────────┼──────────────────────────────────────────────────────────┤
+│ Buzzer (+)       │ GPIO 18                                                  │
+│ Buzzer (-)       │ GND                                                      │
+├──────────────────┼──────────────────────────────────────────────────────────┤
+│ LED Verde (+)    │ GPIO 19  (via resistor 220Ω)                            │
+│ LED Verde (-)    │ GND                                                      │
+│ LED Vermelho (+) │ GPIO 21  (via resistor 220Ω)                            │
+│ LED Vermelho (-) │ GND                                                      │
+└──────────────────┴──────────────────────────────────────────────────────────┘
+
+OBSERVAÇÕES IMPORTANTES:
+- LCD usa I2C nos pinos 22/23 (padrão ESP32). Resistores 4.7k nos pull-ups SDA/SCL.
+- Keypad 4x4 membrana: linhas nas GPIOs 13,12,14,27 e colunas nas 26,25,33,32.
+- Buzzer PASSIVO no GPIO 18 (o código usa tone()/noTone()).
+- LEDs com resistores 220Ω em série.
+- Alimentação: ESP32 via USB ou 5V no pino VIN.
+
+
+================================================================================
+2. LAYOUT DO KEYPAD (wokwi-membrane-keypad)
+================================================================================
+
+       ┌───┬───┬───┬───┐
+       │ 1 │ 2 │ 3 │ A │  ← Linha 0 (R1=GPIO13)
+       ├───┼───┼───┼───┤
+       │ 4 │ 5 │ 6 │ B │  ← Linha 1 (R2=GPIO12)
+       ├───┼───┼───┼───┤
+       │ 7 │ 8 │ 9 │ C │  ← Linha 2 (R3=GPIO14)
+       ├───┼───┼───┼───┤
+       │ * │ 0 │ # │ D │  ← Linha 3 (R4=GPIO27)
+       └───┴───┴───┴───┘
+         │   │   │   │
+         ▼   ▼   ▼   ▼
+        C1  C2  C3  C4
+       (26)(25)(33)(32)
+
+FUNÇÕES DAS TECLAS ESPECIAIS:
+-----------------------------
+| Tecla | Posição        | Função                                    |
+|-------|----------------|-------------------------------------------|
+| A     | Linha 0, Col 4 | APAGAR (backspace - remove último dígito) |
+| B     | Linha 1, Col 4 | CANCELAR / NÃO (sai modo / nega confirma) |
+| C     | Linha 2, Col 4 | CONFIRMAR (enter/OK = SIM na confirmação) |
+| D     | Linha 3, Col 4 | MODO MANUAL / LIMPAR TUDO                 |
+| *     | Linha 3, Col 1 | (não usado - reservado)                   |
+| #     | Linha 3, Col 3 | (não usado - reservado)                   |
+
+
+================================================================================
+3. FLUXO DE OPERAÇÃO NO LCD
+================================================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TELA INICIAL (ESPERA)                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Linha 1: "Digite a"                                                         │
+│ Linha 2: "proxima senha"                                                    │
+│                                                                             │
+│ Tecla D → Entra no modo digitação manual                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ MODO DIGITAÇÃO MANUAL                                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Linha 1: "Senha: 123_"   (underscores mostram posições vazias)             │
+│ Linha 2: "C=OK  A=Apaga D=Limpa"                                           │
+│                                                                             │
+│ Teclas 0-9 → Digita número (máx 4 dígitos)                                 │
+│ Tecla A   → Apaga último dígito (backspace)                                │
+│ Tecla D   → Limpa tudo (clear)                                             │
+│ Tecla C   → CONFIRMA → vai para tela de confirmação                        │
+│ Tecla B   → Sai do modo manual, volta para espera                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TELA DE CONFIRMAÇÃO (Dupla confirmação)                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ Linha 1: "Tem certeza?"                                                     │
+│ Linha 2: "C=Sim  A=Nao"                                                     │
+│                                                                             │
+│ Tecla C → SIM: Registra senha, envia para web, toca som, mostra sucesso    │
+│ Tecla A → NÃO: Volta para digitação                                        │
+│ Tecla B → NÃO: Volta para digitação                                        │
+│ Timeout 10s → Volta para digitação                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+         ┌─────────────────────┐           ┌─────────────────────┐
+         │     SUCESSO         │           │     VOLTA DIGITAÇÃO │
+         │ (2 segundos)        │           │                     │
+         ├─────────────────────┤           └─────────────────────┘
+         │ "Senha registrada!"│
+         │ "Senha: 0123"      │
+         └─────────────────────┘
+                    │
+                    ▼
+         ┌─────────────────────┐
+         │   VOLTA ESPERA      │
+         └─────────────────────┘
+
+
+================================================================================
+4. FUNÇÕES DOS BOTÕES FÍSICOS ADICIONAIS
+================================================================================
+
+O código suporta um botão físico "PRÓXIMA" no GPIO 5 (pull-up interno):
+- CLIQUE CURTO (< 1s): Chama próxima senha sequencial
+- CLIQUE LONGO (> 1s): Reseta contador (zera tudo)
+
+Para usar: conecte um push-button entre GPIO 5 e GND.
+
+
+================================================================================
+5. LEDS DE STATUS
+================================================================================
+
+| LED       | Pino  | Estado                    | Significado              |
+|-----------|-------|---------------------------|--------------------------|
+| Verde     | GPIO19| ACESO                     | WiFi Conectado / OK      |
+| Verde     | GPIO19| APAGADO                   | WiFi Desconectado        |
+| Vermelho  | GPIO21| ACESO                     | WiFi Desconectado / Erro |
+| Vermelho  | GPIO21| APAGADO                   | WiFi Conectado / OK      |
+
+
+================================================================================
+6. SONS (BUZZER PASSIVO GPIO 18)
+================================================================================
+
+| Evento              | Padrão sonoro                              |
+|---------------------|--------------------------------------------|
+| Tecla pressionada   | 1 bip curto 1200Hz (30ms)                 |
+| Senha chamada (3x)  | 3 bips 880Hz (100ms cada, intervalo 130ms)|
+| Confirmação/Sucesso | 3 tons ascendentes: 600→800→1000Hz        |
+| Erro/Senha inválida | 1 tom grave 200Hz (300ms)                 |
+
+O padrão de "senha chamada" é IDÊNTICO ao da página web (Web Audio API).
+
+
+================================================================================
+7. PERSISTÊNCIA (EEPROM)
+================================================================================
+
+Dados salvos automaticamente na EEPROM (sobrevivem a reset/desligamento):
+- Senha atual (contador)
+- Histórico das últimas 5 senhas com horários
+- Total de itens no histórico
+
+Endereços EEPROM:
+- 0-3: Senha atual (int)
+- 4-7: Total histórico (int)
+- 8+: Array de struct RegistroSenha[5]
+
+
+================================================================================
+8. SERVIDOR WEB (HTTP) - ENDPOINTS
+================================================================================
+
+Após conectar no WiFi, o ESP32 serve a página web e API:
+
+| Endpoint        | Método | Descrição                              |
+|-----------------|--------|----------------------------------------|
+| /               | GET    | Página HTML principal (painel)         |
+| /api/senha      | GET    | Senha atual + status + contador        |
+| /api/historico  | GET    | Array com últimas 5 senhas             |
+| /api/chamar     | POST   | Chama próxima senha (sequencial)       |
+| /api/reset      | POST   | Reseta contador e histórico            |
+| /api/set        | POST   | Define senha manual (?senha=123)       |
+
+Exemplo resposta /api/senha:
+{
+  "senha": "0123",
+  "horario": "15:30:45",
+  "online": true,
+  "historico_count": 3
+}
+
+
+================================================================================
+9. COMO TESTAR NO WOKWI (SIMULAÇÃO)
+================================================================================
+
+1. Acesse https://wokwi.com
+2. "New Project" → "ESP32"
+3. Copie o conteúdo de wokwi/diagram.json para o editor de diagrama
+   (ou monte arrastando os componentes)
+4. Cole o código main.ino no sketch.ino
+5. Adicione as 3 bibliotecas em "Libraries":
+   - LiquidCrystal_I2C @ 1.1.2
+   - Keypad @ 3.1.1
+   - ArduinoJson @ 7.2.0
+6. Clique "Start Simulation"
+7. No LCD virtual aparecerá "Digite a proxima senha"
+8. Clique nas teclas do keypad virtual:
+   - D → entra modo digitação
+   - Números → digita senha
+   - A → apaga último
+   - C → confirma
+   - Na confirmação: C=Sim, A=Não
+9. Serial Monitor (115200) mostra logs de debug
+
+
+================================================================================
+10. COMO COMPILAR E CARREGAR NO ESP32 REAL (ARDUINO IDE)
+================================================================================
+
+PASSO 1 - Configurar Arduino IDE:
+---------------------------------
+File → Preferences → Additional Boards Manager URLs:
+https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+
+Tools → Board → Boards Manager → Buscar "esp32" → Install (versão 3.x)
+
+PASSO 2 - Instalar Bibliotecas:
+-------------------------------
+Tools → Manage Libraries → Instalar:
+- "LiquidCrystal_I2C" by Frank de Brabander
+- "Keypad" by Mark Stanley, Alexander Brevig
+- "ArduinoJson" by Benoit Blanchon
+
+PASSO 3 - Configurar Código:
+----------------------------
+Edite main.ino e altere:
+  const char* WIFI_SSID = "SEU_SSID_AQUI";
+  const char* WIFI_PASSWORD = "SUA_SENHA_AQUI";
+
+PASSO 4 - Carregar:
+-------------------
+- Conecte ESP32 via USB
+- Tools → Port → Selecione a porta COM
+- Tools → Board → "ESP32 Dev Module"
+- Upload (Ctrl+U)
+
+PASSO 5 - Verificar:
+--------------------
+- Serial Monitor (115200) mostra IP
+- LCD mostra "WiFi Conectado!" + IP
+- LED Verde aceso = WiFi OK
+- Acesse http://IP_MOSTRADO no navegador/celular
+
+
+================================================================================
+11. PLATFORMIO (ALTERNATIVA RECOMENDADA)
+================================================================================
+
+platformio.ini:
+---------------
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+lib_deps =
+    fdebrabander/LiquidCrystal_I2C@^1.1.2
+    markstanley/Keypad@^3.1.1
+    bblanchon/ArduinoJson@^7.2.0
+monitor_speed = 115200
+upload_speed = 921600
+
+Comandos:
+- pio run          # Compila
+- pio run -t upload  # Carrega
+- pio device monitor # Serial monitor
+
+
+================================================================================
+12. TESTE DA PÁGINA WEB
+================================================================================
+
+Após ESP32 conectado:
+1. LCD mostra IP (ex: 192.168.1.100)
+2. No celular/PC na MESMA rede WiFi: http://192.168.1.100
+3. Painel carrega com:
+   - Senha atual grande (amarelo)
+   - Histórico das 5 últimas
+   - Botão "Chamar (Teste)" - simula chamada
+   - Botão "Reset" - zera contador
+   - Checkbox "Som" - liga/desliga bip
+   - Checkbox "Auto" - liga/desliga atualização automática (polling 2s)
+4. Ao chamar senha (pelo keypad ou botão web):
+   - Som toca nos ALTO-FALANTES do celular/PC (Web Audio API)
+   - Histórico atualiza automaticamente
+   - Animação na senha chamada
+
+
+================================================================================
+13. SOLUÇÃO DE PROBLEMAS COMUNS
+================================================================================
+
+| Problema                          | Causa Provável                    | Solução                              |
+|-----------------------------------|-----------------------------------|--------------------------------------|
+| LCD não liga / mostra quadrados   | Endereço I2C errado               | Tente 0x3F no lugar de 0x27          |
+| LCD não liga                      | Fios SDA/SCL invertidos           | Verifique: SDA=GPIO22, SCL=GPIO23    |
+| LCD não liga                      | Falta pull-up 4.7k                | Coloque resistores 4.7k SDA/SCL→3V3  |
+| Keypad não responde               | Pinos trocados                    | Confira diagram.json conexões        |
+| Keypad teclas erradas             | Linhas/colunas invertidas         | Verifique array pinosLinhas/Colunas  |
+| Buzzer não toca                   | Buzzer ativo (não passivo)        | Use buzzer PASSIVO (2 pinos)         |
+| WiFi não conecta                  | SSID/senha errados                | Edite WIFI_SSID/WIFI_PASSWORD        |
+| Página web não abre               | IP errado / rede diferente        | Celular/PC deve estar na mesma rede  |
+| Histórico some ao reiniciar       | EEPROM não gravou                 | Verifique EEPROM.commit() no código  |
+| Senha não passa de 9999           | Limite MAX_SENHA                  | Altere const int MAX_SENHA = 9999    |
+
+
+================================================================================
+14. PERSONALIZAÇÕES RÁPIDAS
+================================================================================
+
+Alterar limite de dígitos da senha:
+  const int MAX_DIGITOS = 4;  // Mude para 3 ou 5
+
+Alterar quantidade no histórico:
+  const int LIMITE_HISTORICO = 5;  // Mude para 10, 20, etc.
+
+Alterar range de senhas:
+  const int MIN_SENHA = 1;
+  const int MAX_SENHA = 9999;
+
+Desabilitar som do buzzer físico:
+  // Comente as chamadas: somChamada(), somConfirmacao(), etc.
+
+Mudar endereço LCD I2C:
+  LiquidCrystal_I2C lcd(0x3F, 16, 2);  // 0x27 ou 0x3F
+
+
+================================================================================
+15. ARQUIVOS DO PROJETO (RESUMO)
+================================================================================
+
+E:\Projetos de Programação\AtividadesIFMS\projeto-senha-lanchonete\
+│
+├── esp32/
+│   └── main.ino           ← CÓDIGO PRINCIPAL (compile e carregue no ESP32)
+│
+├── wokwi/
+│   ├── diagram.json       ← DIAGRAMA WOKWI (simulação)
+│   └── libraries.txt      ← BIBLIOTECAS para Wokwi
+│
+└── web/                   ← Interface web (já no GitHub)
+    ├── index.html
+    ├── style.css
+    └── script.js
+
+
+================================================================================
+FIM DO DOCUMENTO
+================================================================================
+
+Para dúvidas ou melhorias, consulte o código-fonte comentado em main.ino.
+O sistema está pronto para uso em produção na lanchonete!
