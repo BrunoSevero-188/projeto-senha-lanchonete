@@ -1,12 +1,18 @@
 /*
   SISTEMA DE SENHAS - LANCHONETE
-  ESP32 + LCD 16x2 I2C + Keypad 4x4 + Buzzer + LEDs
+  ESP32 + TFT ILI9341 320x240 SPI + Keypad 4x4 + Buzzer + LEDs
 
-  PINOS:
-  LCD SDA=GPIO22, SCL=GPIO23
-  Keypad linhas R1-R4: 13, 12, 14, 27
-  Keypad colunas C1-C4: 26, 25, 33, 32
-  Buzzer=GPIO18 | LED verde=GPIO19 | LED vermelho=GPIO21
+  PINOS TFT (VSPI):
+  SCK  = GPIO 18 | MOSI = GPIO 23 | MISO = GPIO 19
+  CS   = GPIO 5  | DC   = GPIO 2  | RST  = GPIO 15
+  BL   = GPIO 21 (backlight PWM)
+
+  PINOS KEYPAD 4x4:
+  Linhas R1-R4: 13, 12, 14, 27
+  Colunas C1-C4: 26, 25, 33, 32
+
+  PINOS SAÍDA:
+  Buzzer = GPIO 4  | LED Verde = GPIO 16 | LED Vermelho = GPIO 17
 
   TECLADO:
   D = entrar no modo manual / limpar todos os dígitos
@@ -14,10 +20,12 @@
   A = apagar último dígito / voltar da confirmação
   C = confirmar senha
   B = cancelar e sair do modo manual
+  # (segurar 3s) = entrar no modo configuração WiFi
 
   Bibliotecas externas em libraries.txt:
   Keypad
-  LiquidCrystal I2C
+  Adafruit ILI9341
+  Adafruit GFX Library
   ArduinoJson
 */
 
@@ -25,17 +33,54 @@
 #include <WebServer.h>
 #include <ArduinoJson.h>
 #include <Keypad.h>
-#include <LiquidCrystal_I2C.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
 #include <EEPROM.h>
-#include <Wire.h>
+#include <DNSServer.h>
+
+// ==================== CONFIGURAÇÃO WIFI (EEPROM) ====================
+const int EEPROM_SIZE = 1024;
+const int ADDR_WIFI_SSID = 0;
+const int ADDR_WIFI_PASS = 64;
+const int ADDR_WIFI_CONFIGURED = 128;
+const int ADDR_SENHA_ATUAL = 132;
+const int ADDR_TOTAL_HIST = 136;
+const int ADDR_HISTORICO = 140;
+
+char wifi_ssid[64] = "Wokwi-GUEST";
+char wifi_pass[64] = "";
+bool wifi_configurado = false;
 
 // ==================== WIFI E SERVIDOR ====================
-const char* WIFI_SSID = "Wokwi-GUEST";
-const char* WIFI_PASSWORD = "";
 WebServer server(80);
+DNSServer dnsServer;
+const byte DNS_PORT = 53;
+bool modoAP = false;
+unsigned long apInicio = 0;
+const unsigned long AP_TIMEOUT = 300000; // 5 min
 
-// ==================== LCD ====================
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+// ==================== TFT ILI9341 ====================
+#define TFT_SCK   18
+#define TFT_MOSI  23
+#define TFT_MISO  19
+#define TFT_CS    5
+#define TFT_DC    2
+#define TFT_RST   15
+#define TFT_BL    21
+
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCK, TFT_RST, TFT_MISO);
+
+// Cores personalizadas (tema escuro estilo painel)
+#define COR_FUNDO       0x0861   // #0d1b2a
+#define COR_PAINEL      0x2124   // #1b2a4a
+#define COR_DESTAQUE    0xFFB0   // #ffd60a
+#define COR_VERDE       0x07E0   // #00e676
+#define COR_VERMELHO    0xF800   // #ff0000
+#define COR_TEXTO       0xFFFF   // branco
+#define COR_TEXTO_FRACO 0x8410   // #888888
+#define COR_BORDA       0x4A49   // #2d4466
+#define COR_LARANJA     0xFD20   // #ff9500
 
 // ==================== TECLADO 4x4 ====================
 const byte LINHAS = 4;
@@ -55,20 +100,15 @@ Keypad keypad = Keypad(makeKeymap(teclas), pinosLinhas, pinosColunas,
                       LINHAS, COLUNAS);
 
 // ==================== PINOS DE SAÍDA ====================
-const int BUZZER_PIN = 18;
-const int LED_VERDE = 19;
-const int LED_VERMELHO = 21;
+const int BUZZER_PIN = 4;
+const int LED_VERDE  = 16;
+const int LED_VERMELHO = 17;
 
 // ==================== CONSTANTES ====================
 const int MAX_SENHA = 9999;
 const int MIN_SENHA = 1;
 const int LIMITE_HISTORICO = 5;
 const int MAX_DIGITOS = 4;
-
-const int EEPROM_SIZE = 512;
-const int ADDR_SENHA_ATUAL = 0;
-const int ADDR_TOTAL_HIST = 4;
-const int ADDR_HISTORICO = 8;
 
 // ==================== ESTRUTURAS E ESTADO ====================
 struct RegistroSenha {
@@ -90,9 +130,10 @@ int posDigita = 0;
 bool modoManual = false;
 bool modoConfirmacao = false;
 unsigned long ultimaTecla = 0;
+unsigned long teclaPressionadaInicio = 0;
+char teclaSegurada = 0;
 
 // ==================== HORÁRIO ====================
-// Recebe: nada. Retorna: horário simulado desde a inicialização do ESP32.
 String obterHorario() {
   unsigned long segs = millis() / 1000;
   int h = (segs / 3600) % 24;
@@ -104,14 +145,12 @@ String obterHorario() {
 }
 
 // ==================== SONS ====================
-// Recebe frequência (Hz) e duração (ms). Retorna: nada; toca um tom.
 void tocarTom(int freq, int duracao) {
   tone(BUZZER_PIN, freq, duracao);
   delay(duracao + 10);
   noTone(BUZZER_PIN);
 }
 
-// Recebe: nada. Retorna: nada; toca três bipes de chamada.
 void somChamada() {
   for (int i = 0; i < 3; i++) {
     tone(BUZZER_PIN, 880, 100);
@@ -120,7 +159,6 @@ void somChamada() {
   noTone(BUZZER_PIN);
 }
 
-// Recebe: nada. Retorna: nada; toca sequência de confirmação.
 void somConfirmacao() {
   tone(BUZZER_PIN, 600, 80); delay(100);
   tone(BUZZER_PIN, 800, 80); delay(100);
@@ -128,14 +166,12 @@ void somConfirmacao() {
   noTone(BUZZER_PIN);
 }
 
-// Recebe: nada. Retorna: nada; toca sinal de erro.
 void somErro() {
   tone(BUZZER_PIN, 200, 300);
   delay(320);
   noTone(BUZZER_PIN);
 }
 
-// Recebe: nada. Retorna: nada; toca um bip curto de tecla.
 void somTecla() {
   tone(BUZZER_PIN, 1200, 30);
   delay(40);
@@ -143,83 +179,58 @@ void somTecla() {
 }
 
 // ==================== LEDs ====================
-// Recebe true se Wi-Fi conectado; false caso contrário. Retorna: nada.
 void atualizarLeds(bool wifiOk) {
   digitalWrite(LED_VERDE, wifiOk ? HIGH : LOW);
   digitalWrite(LED_VERMELHO, wifiOk ? LOW : HIGH);
 }
 
-// ==================== LCD ====================
-// Recebe: nada. Retorna: nada; limpa o LCD.
-void lcdLimpar() {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-}
+// ==================== EEPROM WIFI ====================
+void carregarConfigWiFi() {
+  EEPROM.begin(EEPROM_SIZE);
+  wifi_configurado = EEPROM.readBool(ADDR_WIFI_CONFIGURED);
 
-// Recebe linha (0 ou 1) e texto. Retorna: nada; centraliza no LCD 16x2.
-void lcdCentralizado(int linha, const char* texto) {
-  int len = strlen(texto);
-  int col = (len >= 16) ? 0 : (16 - len) / 2;
-  lcd.setCursor(col, linha);
-  lcd.print(texto);
-}
-
-// Recebe: nada. Retorna: nada; mostra a tela de espera.
-void mostrarEspera() {
-  lcdLimpar();
-  lcdCentralizado(0, "Digite a");
-  lcdCentralizado(1, "proxima senha");
-}
-
-// Recebe: nada. Retorna: nada; mostra o buffer de digitação.
-void mostrarDigitacao() {
-  lcdLimpar();
-  lcd.setCursor(0, 0);
-  lcd.print("Senha: ");
-  lcd.print(bufferDigita);
-  for (int i = posDigita; i < MAX_DIGITOS; i++) {
-    lcd.print("_");
+  if (wifi_configurado) {
+    for (int i = 0; i < 63; i++) {
+      char c = EEPROM.readChar(ADDR_WIFI_SSID + i);
+      if (c == 0) break;
+      wifi_ssid[i] = c;
+    }
+    for (int i = 0; i < 63; i++) {
+      char c = EEPROM.readChar(ADDR_WIFI_PASS + i);
+      if (c == 0) break;
+      wifi_pass[i] = c;
+    }
   }
-
-  // Esta mensagem cabe nas 16 colunas do LCD.
-  lcd.setCursor(0, 1);
-  lcd.print("A=Apaga C=OK B=Sai");
 }
 
-// Recebe: nada. Retorna: nada; solicita confirmação da senha.
-void mostrarConfirmacao() {
-  lcdLimpar();
-  lcdCentralizado(0, "Confirmar senha?");
-  lcdCentralizado(1, "C=Sim A/B=Nao");
+void salvarConfigWiFi(const char* ssid, const char* pass) {
+  EEPROM.begin(EEPROM_SIZE);
+  for (int i = 0; i < 64; i++) EEPROM.writeChar(ADDR_WIFI_SSID + i, 0);
+  for (int i = 0; i < 64; i++) EEPROM.writeChar(ADDR_WIFI_PASS + i, 0);
+
+  for (int i = 0; i < strlen(ssid) && i < 63; i++) EEPROM.writeChar(ADDR_WIFI_SSID + i, ssid[i]);
+  for (int i = 0; i < strlen(pass) && i < 63; i++) EEPROM.writeChar(ADDR_WIFI_PASS + i, pass[i]);
+
+  EEPROM.writeBool(ADDR_WIFI_CONFIGURED, true);
+  EEPROM.commit();
+
+  strcpy(wifi_ssid, ssid);
+  strcpy(wifi_pass, pass);
+  wifi_configurado = true;
 }
 
-// Recebe o número da senha. Retorna: nada; exibe o registro concluído.
-void mostrarSucesso(int senha) {
-  lcdLimpar();
-  lcdCentralizado(0, "Senha registrada!");
-  char buf[17];
-  snprintf(buf, sizeof(buf), "Senha: %04d", senha);
-  lcdCentralizado(1, buf);
+void limparConfigWiFi() {
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.writeBool(ADDR_WIFI_CONFIGURED, false);
+  EEPROM.commit();
+  wifi_configurado = false;
+  strcpy(wifi_ssid, "Wokwi-GUEST");
+  strcpy(wifi_pass, "");
 }
 
-// Recebe uma mensagem. Retorna: nada; exibe o erro.
-void mostrarErro(const char* msg) {
-  lcdLimpar();
-  lcdCentralizado(0, "ERRO");
-  lcdCentralizado(1, msg);
-}
-
-// Recebe: nada. Retorna: nada; exibe o endereço IP do ESP32.
-void mostrarIP() {
-  lcdLimpar();
-  lcdCentralizado(0, "IP do ESP32:");
-  String ip = WiFi.localIP().toString();
-  lcdCentralizado(1, ip.c_str());
-}
-
-// ==================== EEPROM ====================
-// Recebe: nada. Retorna: nada; salva senha atual e histórico.
+// ==================== EEPROM SENHAS ====================
 void salvarEstado() {
+  EEPROM.begin(EEPROM_SIZE);
   EEPROM.writeInt(ADDR_SENHA_ATUAL, estado.senhaAtual);
   EEPROM.writeInt(ADDR_TOTAL_HIST, estado.totalHistorico);
 
@@ -230,7 +241,6 @@ void salvarEstado() {
   EEPROM.commit();
 }
 
-// Recebe: nada. Retorna: nada; recupera e valida os dados salvos.
 void carregarEstado() {
   EEPROM.begin(EEPROM_SIZE);
 
@@ -259,8 +269,222 @@ void carregarEstado() {
   }
 }
 
+// ==================== TFT FUNÇÕES AUXILIARES ====================
+void tftLimpar() {
+  tft.fillScreen(COR_FUNDO);
+}
+
+void tftDesenharPainel(int x, int y, int w, int h, uint16_t corBorda = COR_BORDA) {
+  tft.fillRoundRect(x, y, w, h, 12, COR_PAINEL);
+  tft.drawRoundRect(x, y, w, h, 12, corBorda);
+}
+
+void tftTextoCentralizado(int x, int y, int w, const char* texto, uint16_t cor, uint8_t tamanho = 2) {
+  int16_t x1, y1;
+  uint16_t tw, th;
+  tft.setTextSize(tamanho);
+  tft.setTextColor(cor);
+  tft.getTextBounds(texto, 0, 0, &x1, &y1, &tw, &th);
+  int cx = x + (w - tw) / 2;
+  tft.setCursor(cx, y);
+  tft.print(texto);
+}
+
+void tftTexto(int x, int y, const char* texto, uint16_t cor, uint8_t tamanho = 2) {
+  tft.setCursor(x, y);
+  tft.setTextColor(cor);
+  tft.setTextSize(tamanho);
+  tft.print(texto);
+}
+
+void tftNumeroGrande(int x, int y, int w, int numero, uint16_t cor) {
+  char buf[6];
+  snprintf(buf, sizeof(buf), "%04d", numero);
+  tft.setTextSize(5);
+  tft.setTextColor(cor);
+  int16_t x1, y1;
+  uint16_t tw, th;
+  tft.getTextBounds(buf, 0, 0, &x1, &y1, &tw, &th);
+  int cx = x + (w - tw) / 2;
+  tft.setCursor(cx, y);
+  tft.print(buf);
+}
+
+void desenharCabecalho(const char* titulo, const char* subtitulo = "") {
+  tft.fillRect(0, 0, 320, 50, COR_PAINEL);
+  tft.drawFastHLine(0, 50, 320, COR_BORDA);
+  tftTexto(15, 8, titulo, COR_DESTAQUE, 1);
+  if (strlen(subtitulo) > 0) {
+    tftTexto(15, 26, subtitulo, COR_TEXTO_FRACO, 1);
+  }
+  // Indicador WiFi no canto superior direito
+  uint16_t corWifi = WiFi.status() == WL_CONNECTED ? COR_VERDE : (modoAP ? COR_LARANJA : COR_VERMELHO);
+  tft.fillCircle(300, 25, 8, corWifi);
+  tft.setTextSize(1);
+  tft.setTextColor(COR_TEXTO_FRACO);
+  tft.setCursor(250, 35);
+  if (modoAP) tft.print("AP MODE");
+  else tft.print(WiFi.status() == WL_CONNECTED ? "ONLINE" : "OFFLINE");
+}
+
+void desenharRodape(const char* infoExtra = "") {
+  tft.fillRect(0, 210, 320, 30, COR_PAINEL);
+  tft.drawFastHLine(0, 210, 320, COR_BORDA);
+  if (strlen(infoExtra) > 0) {
+    tftTextoCentralizado(0, 216, 320, infoExtra, COR_TEXTO_FRACO, 1);
+  } else {
+    tftTextoCentralizado(0, 216, 320, "Sistema de Senhas v1.1", COR_TEXTO_FRACO, 1);
+  }
+}
+
+void desenharBarraProgresso(int x, int y, int w, int h, int progresso, int total, uint16_t corFundo, uint16_t corBarra) {
+  tft.fillRoundRect(x, y, w, h, 4, corFundo);
+  int largura = map(progresso, 0, total, 0, w - 4);
+  if (largura > 2) tft.fillRoundRect(x + 2, y + 2, largura, h - 4, 2, corBarra);
+}
+
+// ==================== TELAS DO SISTEMA ====================
+void mostrarEspera() {
+  tftLimpar();
+  desenharCabecalho("PAINEL DE ATENDIMENTO", "Sistema pronto");
+
+  // Painel principal com senha atual
+  tftDesenharPainel(20, 70, 280, 120, COR_VERDE);
+  tftTextoCentralizado(20, 85, 280, "SENHA ATUAL", COR_TEXTO_FRACO, 2);
+
+  if (estado.senhaAtual > 0) {
+    tftNumeroGrande(20, 115, 280, estado.senhaAtual, COR_DESTAQUE);
+  } else {
+    tftTextoCentralizado(20, 125, 280, "---", COR_TEXTO_FRACO, 5);
+  }
+
+  // Instruções
+  tftDesenharPainel(20, 195, 280, 30);
+  tftTextoCentralizado(20, 200, 280, "Pressione [D] para Digite Nova Senha", COR_TEXTO_FRACO, 1);
+
+  desenharRodape("Pressione [#] 3s = Config WiFi");
+}
+
+void mostrarDigitacao() {
+  tftLimpar();
+  desenharCabecalho("MODO MANUAL", "Digite Nova Senha");
+
+  // Painel de digitação com título claro
+  tftDesenharPainel(20, 70, 280, 100);
+  tftTextoCentralizado(20, 80, 280, "DIGITE NOVA SENHA", COR_DESTAQUE, 2);
+
+  // Mostra dígitos com placeholder
+  char display[5] = "";
+  for (int i = 0; i < MAX_DIGITOS; i++) {
+    display[i] = (i < posDigita) ? bufferDigita[i] : '_';
+  }
+  display[MAX_DIGITOS] = '\0';
+
+  tftNumeroGrande(20, 110, 280, (posDigita > 0) ? atoi(display) : 0, COR_DESTAQUE);
+
+  // Placeholders visuais
+  tft.setTextSize(3);
+  tft.setTextColor(COR_TEXTO_FRACO);
+  for (int i = 0; i < MAX_DIGITOS; i++) {
+    int x = 70 + i * 45;
+    int y = 155;
+    if (i < posDigita) {
+      tft.setCursor(x, y);
+      tft.setTextColor(COR_DESTAQUE);
+      tft.print(bufferDigita[i]);
+    } else {
+      tft.setCursor(x, y);
+      tft.print("_");
+    }
+  }
+
+  // Teclas de ajuda
+  tftDesenharPainel(20, 185, 280, 30);
+  tftTextoCentralizado(20, 190, 280, "[A]=Apaga  [C]=Confirma  [B]=Cancela", COR_TEXTO_FRACO, 1);
+
+  desenharRodape("Senha: 1 a 4 digitos (1-9999)");
+}
+
+void mostrarConfirmacao() {
+  tftLimpar();
+  desenharCabecalho("CONFIRMACAO", "Confirmar Senha");
+
+  tftDesenharPainel(20, 70, 280, 120, COR_LARANJA);
+  tftTextoCentralizado(20, 85, 280, "CONFIRMAR SENHA", COR_FUNDO, 2);
+  tftTextoCentralizado(20, 115, 280, "Digite a senha", COR_FUNDO, 2);
+  tftTextoCentralizado(20, 145, 280, "abaixo:", COR_FUNDO, 2);
+
+  tftNumeroGrande(20, 170, 280, atoi(bufferDigita), COR_DESTAQUE);
+
+  // Botões de confirmação
+  tftDesenharPainel(20, 195, 130, 30, COR_VERDE);
+  tftTextoCentralizado(20, 200, 130, "[C] SIM", COR_FUNDO, 2);
+
+  tftDesenharPainel(170, 195, 130, 30, COR_VERMELHO);
+  tftTextoCentralizado(170, 200, 130, "[A/B] NAO", COR_FUNDO, 2);
+
+  desenharRodape("Confirme para registrar a senha");
+}
+
+void mostrarSucesso(int senha) {
+  tftLimpar();
+  desenharCabecalho("SUCESSO", "Senha Registrada");
+
+  tftDesenharPainel(20, 70, 280, 120, COR_VERDE);
+  tftTextoCentralizado(20, 90, 280, "SENHA CHAMADA!", COR_FUNDO, 2);
+  tftNumeroGrande(20, 115, 280, senha, COR_DESTAQUE);
+
+  desenharRodape("Proxima chamada em 2 segundos...");
+}
+
+void mostrarErro(const char* msg) {
+  tftLimpar();
+  desenharCabecalho("ERRO", "");
+
+  tftDesenharPainel(20, 80, 280, 100, COR_VERMELHO);
+  tftTextoCentralizado(20, 105, 280, msg, COR_TEXTO, 2);
+  tftTextoCentralizado(20, 140, 280, "Tente novamente", COR_TEXTO_FRACO, 1);
+
+  desenharRodape("");
+}
+
+void mostrarIP() {
+  tftLimpar();
+  desenharCabecalho("CONEXAO WIFI", modoAP ? "Modo Access Point" : "Conectado");
+
+  tftDesenharPainel(20, 80, 280, 100);
+  tftTextoCentralizado(20, 100, 280, modoAP ? "IP do AP:" : "IP do ESP32:", COR_TEXTO_FRACO, 2);
+  String ip = modoAP ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+  tftTextoCentralizado(20, 130, 280, ip.c_str(), COR_DESTAQUE, 3);
+
+  if (modoAP) {
+    tftDesenharPainel(20, 190, 280, 30, COR_LARANJA);
+    tftTextoCentralizado(20, 195, 280, "Conecte no WiFi: SENHA-AP", COR_FUNDO, 1);
+  }
+
+  desenharRodape("");
+}
+
+// ==================== TELA CONFIGURAÇÃO WIFI ====================
+void mostrarConfigWiFi() {
+  tftLimpar();
+  desenharCabecalho("CONFIGURAR WIFI", "Portal Cativo Ativo");
+
+  tftDesenharPainel(20, 70, 280, 120);
+  tftTextoCentralizado(20, 85, 280, "Conecte no WiFi:", COR_TEXTO, 2);
+  tftTextoCentralizado(20, 110, 280, "SENHA-CONFIG", COR_DESTAQUE, 3);
+  tftTextoCentralizado(20, 145, 280, "Senha: 12345678", COR_TEXTO_FRACO, 1);
+  tftTextoCentralizado(20, 165, 280, "Acesse: 192.168.4.1", COR_DESTAQUE, 2);
+
+  // Barra de timeout
+  int tempoRestante = (AP_TIMEOUT - (millis() - apInicio)) / 1000;
+  desenharBarraProgresso(20, 195, 280, 15, tempoRestante, 300, COR_BORDA, COR_LARANJA);
+  tftTextoCentralizado(20, 178, 280, ("Tempo: " + String(tempoRestante) + "s").c_str(), COR_TEXTO_FRACO, 1);
+
+  desenharRodape("[B] Cancelar  [#] 3s = Sair");
+}
+
 // ==================== LÓGICA DE SENHAS ====================
-// Recebe uma nova senha. Retorna: nada; move a anterior ao histórico.
 void adicionarHistorico(int senha) {
   if (estado.senhaAtual > 0) {
     for (int i = LIMITE_HISTORICO - 1; i > 0; i--) {
@@ -282,7 +506,6 @@ void adicionarHistorico(int senha) {
   salvarEstado();
 }
 
-// Recebe: nada. Retorna: nada; gera e chama a próxima senha.
 void chamarProxima() {
   int prox = estado.senhaAtual + 1;
   if (prox > MAX_SENHA) prox = MIN_SENHA;
@@ -295,7 +518,6 @@ void chamarProxima() {
   mostrarEspera();
 }
 
-// Recebe: nada. Retorna: nada; zera contador e histórico.
 void resetarContador() {
   estado.senhaAtual = 0;
   estado.totalHistorico = 0;
@@ -308,13 +530,14 @@ void resetarContador() {
 
   salvarEstado();
   somConfirmacao();
-  lcdLimpar();
-  lcdCentralizado(0, "Contador resetado");
+  tftLimpar();
+  desenharCabecalho("RESET", "");
+  tftDesenharPainel(20, 100, 280, 60, COR_DESTAQUE);
+  tftTextoCentralizado(20, 115, 280, "Contador resetado", COR_FUNDO, 2);
   delay(1500);
   mostrarEspera();
 }
 
-// Recebe número digitado. Retorna: nada; valida e registra a senha.
 void definirSenhaManual(int senha) {
   if (senha >= MIN_SENHA && senha <= MAX_SENHA) {
     adicionarHistorico(senha);
@@ -323,11 +546,89 @@ void definirSenhaManual(int senha) {
     delay(2000);
   } else {
     somErro();
-    mostrarErro("Senha invalida");
+    mostrarErro("Senha invalida (1-9999)");
     delay(1500);
   }
   mostrarEspera();
 }
+
+// ==================== PORTAL CAPTIVO (CONFIG WIFI) ====================
+const char HTML_CONFIG[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Configurar WiFi - Painel de Senhas</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{min-height:100vh;background:#0d1b2a;color:#fff;font-family:sans-serif;display:flex;justify-content:center;align-items:center;padding:20px}
+.container{width:100%;max-width:400px;background:#1b2a4a;border:1px solid #2d4466;border-radius:20px;padding:30px;box-shadow:0 15px 50px rgba(0,0,0,.4)}
+h1{color:#ffd60a;font-size:24px;margin-bottom:10px;text-align:center}
+.subtitle{color:#888;text-align:center;margin-bottom:30px;font-size:14px}
+.form-group{margin-bottom:20px}
+label{display:block;margin-bottom:8px;color:#ffd60a;font-weight:bold}
+input[type="text"],input[type="password"]{width:100%;padding:15px;border:1px solid #2d4466;border-radius:10px;background:#14253d;color:#fff;font-size:16px;outline:none}
+input:focus{border-color:#ffd60a}
+button{width:100%;padding:15px;background:#ffd60a;color:#0d1b2a;border:0;border-radius:10px;font-size:16px;font-weight:bold;cursor:pointer}
+button:hover{filter:brightness(1.1)}
+.status{text-align:center;margin-top:20px;padding:15px;border-radius:10px;display:none}
+.status.success{background:#00e676;color:#0d1b2a;display:block}
+.status.error{background:#ff0000;color:#fff;display:block}
+.info{background:#14253d;border:1px solid #2d4466;border-radius:10px;padding:15px;margin-bottom:20px;font-size:13px;color:#888}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>🔧 Configurar WiFi</h1>
+<p class="subtitle">Painel de Senhas - Lanchonete</p>
+<div class="info">
+<strong>Modo Configuração Ativo</strong><br>
+Conecte seu celular/PC no WiFi <b>SENHA-CONFIG</b> (senha: 12345678)<br>
+Preencha abaixo os dados da sua rede WiFi.
+</div>
+<form id="wifiForm">
+<div class="form-group">
+<label>Nome da Rede (SSID)</label>
+<input type="text" id="ssid" name="ssid" required placeholder="MinhaRedeWiFi">
+</div>
+<div class="form-group">
+<label>Senha da Rede</label>
+<input type="password" id="pass" name="pass" placeholder="Deixe vazio se aberta">
+</div>
+<button type="submit">Salvar e Conectar</button>
+</form>
+<div id="status" class="status"></div>
+</div>
+<script>
+document.getElementById('wifiForm').addEventListener('submit',async(e)=>{
+e.preventDefault();
+const btn=e.target.querySelector('button');
+btn.disabled=true;btn.textContent='Conectando...';
+const formData=new FormData(e.target);
+try{
+const r=await fetch('/savewifi',{method:'POST',body:formData});
+const d=await r.json();
+const status=document.getElementById('status');
+if(d.success){
+status.className='status success';
+status.textContent='✅ '+d.msg+' Reiniciando...';
+setTimeout(()=>location.href='/',3000);
+}else{
+status.className='status error';
+status.textContent='❌ '+d.msg;
+btn.disabled=false;btn.textContent='Salvar e Conectar';
+}
+}catch(err){
+document.getElementById('status').className='status error';
+document.getElementById('status').textContent='❌ Erro de conexão';
+btn.disabled=false;btn.textContent='Salvar e Conectar';
+}
+});
+</script>
+</body>
+</html>
+)rawliteral";
 
 // ==================== PAINEL WEB (HTML EMBUTIDO) ====================
 const char HTML_INDEX[] PROGMEM = R"rawliteral(
@@ -368,7 +669,7 @@ button:hover{filter:brightness(1.1)}
 <main class="painel">
 <header class="cabecalho">
 <div><span class="identificador">PAINEL DE ATENDIMENTO</span><h1>Senha Atual</h1></div>
-<div class="status"><span class="status-indicador"></span><span>Conectado</span></div>
+<div class="status"><span class="status-indicador"></span><span id="statusTexto">Conectado</span></div>
 </header>
 <section class="senha-atual" aria-live="assertive">
 <span class="legenda">SENHA CHAMADA</span>
@@ -394,80 +695,87 @@ button:hover{filter:brightness(1.1)}
 const senhaEl=document.getElementById('senhaAtual');
 const histEl=document.getElementById('historico');
 const msgEl=document.getElementById('msg');
+const statusTexto=document.getElementById('statusTexto');
 let som=true, intervalo=null, ultimaSenha='---';
 
 async function carregar(){
-  try{
-    const r=await fetch('/api/senha');
-    const d=await r.json();
-    atualizar(d);
-  }catch(e){console.log('Erro ao carregar senha:',e);}
+try{
+const r=await fetch('/api/senha');
+const d=await r.json();
+atualizar(d);
+statusTexto.textContent='Online';
+statusTexto.style.color='#00e676';
+}catch(e){
+console.log('Erro ao carregar senha:',e);
+statusTexto.textContent='Offline';
+statusTexto.style.color='#ff0000';
+}
 }
 
 function atualizar(d){
-  const senha=d.senha||'---';
-  senhaEl.textContent=senha;
-  msgEl.textContent=senha!=='---'?'Senha '+senha+' chamada!':'Aguardando...';
+const senha=d.senha||'---';
+senhaEl.textContent=senha;
+msgEl.textContent=senha!=='---'?'Senha '+senha+' chamada!':'Aguardando...';
 
-  if(senha!=='---' && som && senha!==ultimaSenha){
-    const AudioCtx=window.AudioContext||window.webkitAudioContext;
-    if(AudioCtx){
-      const ctx=new AudioCtx();
-      [0,180,360].forEach(t=>{
-        const o=ctx.createOscillator(),g=ctx.createGain();
-        o.type='sine';o.frequency.value=880;
-        g.gain.setValueAtTime(.0001,ctx.currentTime+t/1000);
-        g.gain.exponentialRampToValueAtTime(.25,ctx.currentTime+t/1000+.02);
-        g.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+t/1000+.15);
-        o.connect(g);g.connect(ctx.destination);
-        o.start(ctx.currentTime+t/1000);
-        o.stop(ctx.currentTime+t/1000+.15);
-      });
-    }
-  }
-  ultimaSenha=senha;
+if(senha!=='---' && som && senha!==ultimaSenha){
+const AudioCtx=window.AudioContext||window.webkitAudioContext;
+if(AudioCtx){
+const ctx=new AudioCtx();
+[0,180,360].forEach(t=>{
+const o=ctx.createOscillator(),g=ctx.createGain();
+o.type='sine';o.frequency.value=880;
+g.gain.setValueAtTime(.0001,ctx.currentTime+t/1000);
+g.gain.exponentialRampToValueAtTime(.25,ctx.currentTime+t/1000+.02);
+g.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+t/1000+.15);
+o.connect(g);g.connect(ctx.destination);
+o.start(ctx.currentTime+t/1000);
+o.stop(ctx.currentTime+t/1000+.15);
+});
+}
+}
+ultimaSenha=senha;
 }
 
 async function carregarHist(){
-  try{
-    const r=await fetch('/api/historico');
-    const d=await r.json();
-    histEl.innerHTML='';
-    if(!d.historico||d.historico.length===0){
-      histEl.innerHTML='<li style="grid-column:1/-1;color:#888;padding:20px">Nenhuma senha ainda</li>';
-      return;
-    }
-    d.historico.forEach(h=>{
-      const li=document.createElement('li');
-      const n=document.createElement('div');
-      n.className='historico-senha';n.textContent=h.senha;
-      const t=document.createElement('div');
-      t.className='historico-horario';t.textContent=h.horario;
-      li.append(n,t);histEl.appendChild(li);
-    });
-  }catch(e){console.log('Erro no historico:',e);}
+try{
+const r=await fetch('/api/historico');
+const d=await r.json();
+histEl.innerHTML='';
+if(!d.historico||d.historico.length===0){
+histEl.innerHTML='<li style="grid-column:1/-1;color:#888;padding:20px">Nenhuma senha ainda</li>';
+return;
+}
+d.historico.forEach(h=>{
+const li=document.createElement('li');
+const n=document.createElement('div');
+n.className='historico-senha';n.textContent=h.senha;
+const t=document.createElement('div');
+t.className='historico-horario';t.textContent=h.horario;
+li.append(n,t);histEl.appendChild(li);
+});
+}catch(e){console.log('Erro no historico:',e);}
 }
 
 async function testar(){
-  await fetch('/api/chamar',{method:'POST'});
-  await carregar();await carregarHist();
+await fetch('/api/chamar',{method:'POST'});
+await carregar();await carregarHist();
 }
 
 async function resetar(){
-  if(confirm('Resetar contador?')){
-    await fetch('/api/reset',{method:'POST'});
-    ultimaSenha='---';
-    await carregar();await carregarHist();
-  }
+if(confirm('Resetar contador?')){
+await fetch('/api/reset',{method:'POST'});
+ultimaSenha='---';
+await carregar();await carregarHist();
+}
 }
 
 document.getElementById('som').onchange=e=>som=e.target.checked;
 document.getElementById('auto').onchange=e=>{
-  if(e.target.checked){
-    if(!intervalo) intervalo=setInterval(()=>{carregar();carregarHist();},2000);
-  }else{
-    clearInterval(intervalo);intervalo=null;
-  }
+if(e.target.checked){
+if(!intervalo) intervalo=setInterval(()=>{carregar();carregarHist();},2000);
+}else{
+clearInterval(intervalo);intervalo=null;
+}
 };
 
 intervalo=setInterval(()=>{carregar();carregarHist();},2000);
@@ -478,17 +786,19 @@ carregar();carregarHist();
 )rawliteral";
 
 // ==================== ROTAS DO SERVIDOR WEB ====================
-// Recebe GET /. Retorna a página HTML do painel.
 void handleRoot() {
-  server.send_P(200, "text/html; charset=utf-8", HTML_INDEX);
+  if (modoAP) {
+    server.send_P(200, "text/html; charset=utf-8", HTML_CONFIG);
+  } else {
+    server.send_P(200, "text/html; charset=utf-8", HTML_INDEX);
+  }
 }
 
-// Recebe GET /api/senha. Retorna JSON com senha atual e horário.
 void handleApiSenha() {
   StaticJsonDocument<256> doc;
   doc["senha"] = estado.senhaAtual > 0 ? String(estado.senhaAtual) : "---";
   doc["horario"] = obterHorario();
-  doc["online"] = true;
+  doc["online"] = !modoAP && WiFi.status() == WL_CONNECTED;
   doc["historico_count"] = estado.totalHistorico;
 
   String resp;
@@ -496,7 +806,6 @@ void handleApiSenha() {
   server.send(200, "application/json", resp);
 }
 
-// Recebe GET /api/historico. Retorna JSON com as últimas senhas.
 void handleApiHistorico() {
   StaticJsonDocument<512> doc;
   JsonArray arr = doc.createNestedArray("historico");
@@ -513,19 +822,16 @@ void handleApiHistorico() {
   server.send(200, "application/json", resp);
 }
 
-// Recebe POST /api/chamar. Retorna JSON atualizado da senha.
 void handleApiChamar() {
   chamarProxima();
   handleApiSenha();
 }
 
-// Recebe POST /api/reset. Retorna JSON após reset.
 void handleApiReset() {
   resetarContador();
   handleApiSenha();
 }
 
-// Recebe POST /api/set com parâmetro senha. Retorna JSON atualizado.
 void handleApiSet() {
   if (server.hasArg("senha")) {
     int num = server.arg("senha").toInt();
@@ -534,21 +840,126 @@ void handleApiSet() {
   handleApiSenha();
 }
 
-// Recebe rota desconhecida. Retorna HTTP 404.
+void handleSaveWiFi() {
+  if (server.hasArg("ssid")) {
+    String ssid = server.arg("ssid");
+    String pass = server.arg("pass");
+
+    StaticJsonDocument<256> doc;
+
+    if (ssid.length() > 0) {
+      salvarConfigWiFi(ssid.c_str(), pass.c_str());
+      doc["success"] = true;
+      doc["msg"] = "WiFi salvo! Conectando na rede '" + ssid + "'...";
+      String resp;
+      serializeJson(doc, resp);
+      server.send(200, "application/json", resp);
+
+      // Aguarda envio da resposta e reinicia
+      delay(1000);
+      ESP.restart();
+    } else {
+      doc["success"] = false;
+      doc["msg"] = "SSID não pode ser vazio";
+      String resp;
+      serializeJson(doc, resp);
+      server.send(400, "application/json", resp);
+    }
+  } else {
+    server.send(400, "application/json", "{\"success\":false,\"msg\":\"Dados inválidos\"}");
+  }
+}
+
 void handleNotFound() {
-  server.send(404, "text/plain", "Nao encontrado");
+  if (modoAP) {
+    // Portal cativo - redireciona tudo para a página de config
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  } else {
+    server.send(404, "text/plain", "Nao encontrado");
+  }
+}
+
+// ==================== WIFI ====================
+void iniciarModoAP() {
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("SENHA-CONFIG", "12345678");
+
+  // DNS Server para portal cativo
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+
+  modoAP = true;
+  apInicio = millis();
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/savewifi", HTTP_POST, handleSaveWiFi);
+  server.onNotFound(handleNotFound);
+  server.begin();
+
+  atualizarLeds(false);
+  mostrarConfigWiFi();
+
+  Serial.println("=== MODO AP ATIVADO ===");
+  Serial.println("SSID: SENHA-CONFIG");
+  Serial.println("Senha: 12345678");
+  Serial.println("IP: " + WiFi.softAPIP().toString());
+  Serial.println("Acesse http://192.168.4.1 para configurar");
+}
+
+void conectarWiFi() {
+  if (!wifi_configurado || strlen(wifi_ssid) == 0) {
+    iniciarModoAP();
+    return;
+  }
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(wifi_ssid, wifi_pass);
+
+  tftLimpar();
+  desenharCabecalho("CONECTANDO WIFI", wifi_ssid);
+
+  int tentativas = 0;
+  while (WiFi.status() != WL_CONNECTED && tentativas < 30) {
+    tftDesenharPainel(20, 100, 280, 60);
+    tftTextoCentralizado(20, 115, 280, ("Tentativa " + String(tentativas + 1) + " / 30").c_str(), COR_TEXTO_FRACO, 2);
+    delay(500);
+    tentativas++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    modoAP = false;
+    dnsServer.stop();
+
+    tftLimpar();
+    desenharCabecalho("WIFI CONECTADO", "");
+    tftDesenharPainel(20, 100, 280, 60, COR_VERDE);
+    tftTextoCentralizado(20, 115, 280, WiFi.localIP().toString().c_str(), COR_TEXTO, 3);
+    atualizarLeds(true);
+    Serial.print("WiFi conectado. IP: ");
+    Serial.println(WiFi.localIP());
+    delay(2000);
+
+    // Configura rotas normais
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/api/senha", HTTP_GET, handleApiSenha);
+    server.on("/api/historico", HTTP_GET, handleApiHistorico);
+    server.on("/api/chamar", HTTP_POST, handleApiChamar);
+    server.on("/api/reset", HTTP_POST, handleApiReset);
+    server.on("/api/set", HTTP_POST, handleApiSet);
+    server.onNotFound(handleNotFound);
+  } else {
+    // Falhou - volta para AP
+    iniciarModoAP();
+  }
 }
 
 // ==================== BUFFER DO TECLADO ====================
-// Recebe: nada. Retorna: nada; limpa todos os dígitos digitados.
 void limparBuffer() {
   memset(bufferDigita, 0, sizeof(bufferDigita));
   posDigita = 0;
 }
 
 // ==================== PROCESSAMENTO DO TECLADO ====================
-// Recebe: caractere retornado por keypad.getKey().
-// Retorna: nada; altera o modo, o buffer e a tela conforme a tecla.
 void processarTecla(char tecla) {
   ultimaTecla = millis();
   somTecla();
@@ -560,7 +971,6 @@ void processarTecla(char tecla) {
     if (tecla == 'C') {
       int senha = atoi(bufferDigita);
 
-      // Sai dos modos antes de executar a rotina de registro.
       modoConfirmacao = false;
       modoManual = false;
 
@@ -640,108 +1050,102 @@ void processarTecla(char tecla) {
     modoConfirmacao = false;
     limparBuffer();
     mostrarDigitacao();
-    Serial.println("MODO MANUAL ATIVADO. Digite de 1 a 4 digitos.");
+    Serial.println("MODO MANUAL ATIVADO - Digite Nova Senha");
+  } else if (tecla == '#') {
+    // Verifica se é pressão longa (3s) para config WiFi
+    teclaSegurada = '#';
+    teclaPressionadaInicio = millis();
   } else {
-    Serial.println("Pressione D para entrar no modo manual.");
+    Serial.println("Pressione [D] para Digite Nova Senha");
   }
 
   Serial.printf("Estado: Manual=%d Confirmacao=%d Buffer=%s\n",
                 modoManual, modoConfirmacao, bufferDigita);
 }
 
-// ==================== WIFI ====================
-// Recebe: nada. Retorna: nada; tenta conectar e atualiza LEDs/LCD.
-void conectarWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  lcdLimpar();
-  lcdCentralizado(0, "Conectando WiFi");
-
-  int tentativas = 0;
-  while (WiFi.status() != WL_CONNECTED && tentativas < 30) {
-    lcd.setCursor(0, 1);
-    lcd.print("Tentativa ");
-    lcd.print(tentativas + 1);
-    lcd.print("   ");
-    delay(500);
-    tentativas++;
+void verificarTeclaSegurada() {
+  if (teclaSegurada == '#' && millis() - teclaPressionadaInicio > 3000) {
+    teclaSegurada = 0;
+    somConfirmacao();
+    if (!modoAP) {
+      Serial.println("Entrando no modo configuracao WiFi...");
+      iniciarModoAP();
+    }
   }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    lcdLimpar();
-    lcdCentralizado(0, "WiFi Conectado!");
-    String ip = WiFi.localIP().toString();
-    lcdCentralizado(1, ip.c_str());
-    atualizarLeds(true);
-    Serial.print("WiFi conectado. IP: ");
-    Serial.println(ip);
-    delay(2000);
-  } else {
-    lcdLimpar();
-    lcdCentralizado(0, "Falha WiFi");
-    lcdCentralizado(1, "Modo Offline");
-    atualizarLeds(false);
-    Serial.println("WiFi nao conectado. Modo offline.");
-    delay(2000);
+  if (teclaSegurada == '#' && millis() - teclaPressionadaInicio < 3000) {
+    // Verifica se soltou
+    char tecla = keypad.getKey();
+    if (tecla == NO_KEY) {
+      // Tecla solta antes de 3s
+      teclaSegurada = 0;
+    }
   }
 }
 
 // ==================== SETUP ====================
-// Recebe: nada. Retorna: nada; inicializa periféricos, memória, Wi-Fi e servidor.
 void setup() {
   Serial.begin(115200);
   delay(100);
-  Serial.println("\n=== Sistema de Senhas ESP32 ===");
-  Serial.println("D=Manual | A=Apagar | C=Confirmar | B=Cancelar");
+  Serial.println("\n=== Sistema de Senhas ESP32 + ILI9341 ===");
+  Serial.println("[D] = Digite Nova Senha | [A] = Apaga | [C] = Confirma | [B] = Cancela");
+  Serial.println("[#] segurar 3s = Configurar WiFi");
 
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(LED_VERDE, OUTPUT);
   pinMode(LED_VERMELHO, OUTPUT);
+  pinMode(TFT_BL, OUTPUT);
   digitalWrite(LED_VERDE, LOW);
   digitalWrite(LED_VERMELHO, HIGH);
+  digitalWrite(TFT_BL, HIGH);  // Backlight ON
   noTone(BUZZER_PIN);
 
   keypad.setDebounceTime(50);
   keypad.setHoldTime(500);
 
-  Wire.begin(22, 23);
-  lcd.init();
-  lcd.backlight();
-  lcdLimpar();
-  lcdCentralizado(0, "Iniciando...");
-  lcdCentralizado(1, "v1.1");
-  delay(1000);
+  // Inicializa TFT
+  tft.begin();
+  tft.setRotation(1);  // Landscape
+  tft.fillScreen(COR_FUNDO);
 
+  // Splash screen
+  desenharCabecalho("SISTEMA DE SENHAS", "Iniciando v1.1");
+  tftDesenharPainel(20, 100, 280, 60, COR_DESTAQUE);
+  tftTextoCentralizado(20, 115, 280, "ILI9341 320x240", COR_FUNDO, 2);
+  delay(1500);
+
+  carregarConfigWiFi();
   carregarEstado();
   conectarWiFi();
-
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/api/senha", HTTP_GET, handleApiSenha);
-  server.on("/api/historico", HTTP_GET, handleApiHistorico);
-  server.on("/api/chamar", HTTP_POST, handleApiChamar);
-  server.on("/api/reset", HTTP_POST, handleApiReset);
-  server.on("/api/set", HTTP_POST, handleApiSet);
-  server.onNotFound(handleNotFound);
-  server.begin();
 
   somConfirmacao();
   mostrarEspera();
 
-  Serial.printf("Sistema pronto! IP: %s\n",
-                WiFi.localIP().toString().c_str());
+  Serial.printf("Sistema pronto! %s\n",
+                modoAP ? "Modo AP: http://192.168.4.1" : ("IP: " + WiFi.localIP().toString()).c_str());
 }
 
 // ==================== LOOP PRINCIPAL ====================
-// Recebe: nada. Retorna: nada; atende web, lê teclado e controla timeouts.
 void loop() {
+  // Servidor web + DNS (portal cativo)
   server.handleClient();
+  if (modoAP) {
+    dnsServer.processNextRequest();
 
-  // keypad.getKey() devolve a tecla ou NO_KEY quando nenhuma foi pressionada.
+    // Timeout do modo AP (5 min)
+    if (millis() - apInicio > AP_TIMEOUT) {
+      Serial.println("Timeout modo AP - reiniciando");
+      ESP.restart();
+    }
+  }
+
+  // Teclado
   char tecla = keypad.getKey();
   if (tecla != NO_KEY) {
     processarTecla(tecla);
   }
+
+  // Verifica tecla # segurada
+  verificarTeclaSegurada();
 
   // Encerra modo manual após 30 segundos sem atividade.
   if (modoManual && millis() - ultimaTecla > 30000) {
@@ -761,7 +1165,7 @@ void loop() {
 
   // Verifica Wi-Fi a cada 30 segundos e tenta reconectar se necessário.
   static unsigned long ultimaVerificacao = 0;
-  if (millis() - ultimaVerificacao > 30000) {
+  if (!modoAP && millis() - ultimaVerificacao > 30000) {
     ultimaVerificacao = millis();
 
     if (WiFi.status() != WL_CONNECTED) {
