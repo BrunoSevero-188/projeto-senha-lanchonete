@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#0d1b2a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Painel de Senhas | Lanchonete</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main class="painel" role="main">
+        <!-- Cabeçalho com identificação e status -->
+        <header class="cabecalho">
+            <div class="info-sistema">
+                <span class="identificador">PAINEL DE ATENDIMENTO</span>
+                <h1>Senha Atual</h1>
+                <p class="subtitulo">Acompanhe as chamadas dos pedidos</p>
+            </div>
+            <div class="status-conexao" aria-live="polite">
+                <span class="status-indicador" id="statusIndicador"></span>
+                <span id="statusTexto">Conectando...</span>
+            </div>
+        </header>
+
+        <!-- Seção principal: Senha Atual -->
+        <section class="senha-atual" aria-live="assertive" aria-atomic="true" aria-label="Senha atualmente sendo atendida">
+            <span class="legenda">SENHA CHAMADA</span>
+            <div id="senhaAtual" class="numero-senha" role="heading" aria-level="1">---</div>
+            <p id="mensagem" class="mensagem">Aguardando primeira chamada...</p>
+            <div class="ultima-atualizacao" aria-hidden="true">
+                <span id="relogio">--:--:--</span>
+            </div>
+        </section>
+
+        <!-- Seção: Histórico das últimas 5 senhas -->
+        <section class="historico" aria-label="Histórico das últimas cinco senhas chamadas">
+            <div class="historico-cabecalho">
+                <div>
+                    <span class="identificador">ACOMPANHAMENTO</span>
+                    <h2>Últimas senhas</h2>
+                </div>
+                <span class="contador" id="contador" aria-live="polite">0 / 5</span>
+            </div>
+            <ul id="listaHistorico" class="lista-historico" role="list">
+                <li class="historico-vazio" aria-hidden="true">Nenhuma senha chamada ainda.</li>
+            </ul>
+        </section>
+
+        <!-- Controles e configurações -->
+        <section class="controles" aria-label="Controles do sistema">
+            <div class="botoes-principais">
+                <button id="btnTeste" class="botao-chamar" type="button" aria-label="Simular chamada de senha para teste">
+                    <span aria-hidden="true">🔔</span> Chamar senha (teste)
+                </button>
+                <button id="btnLimparHistorico" class="botao-secundario" type="button" aria-label="Limpar todo o histórico">
+                    <span aria-hidden="true">🗑️</span> Limpar histórico
+                </button>
+            </div>
+            <div class="configuracoes">
+                <label class="controle-som" for="somAtivo">
+                    <input type="checkbox" id="somAtivo" checked aria-label="Ativar som de notificação">
+                    <span class="checkbox-custom"></span>
+                    <span>Som ativado</span>
+                </label>
+                <label class="controle-auto" for="autoUpdate">
+                    <input type="checkbox" id="autoUpdate" checked aria-label="Atualização automática">
+                    <span class="checkbox-custom"></span>
+                    <span>Auto-atualizar</span>
+                </label>
+            </div>
+        </section>
+
+        <!-- Rodapé -->
+        <footer class="rodape" role="contentinfo">
+            <span>Sistema de Senhas v1.0</span>
+            <span id="versao">ESP32 Conectado</span>
+        </footer>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>
