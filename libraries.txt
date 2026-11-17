@@ -1,10 +1,6 @@
-# Wokwi Library List
-# See https://docs.wokwi.com/guides/libraries
-
-# Automatically added based on includes:
+# Bibliotecas Arduino/Wokwi
 Keypad
 Adafruit ILI9341
 Adafruit GFX Library
+PubSubClient
 ArduinoJson
-
-# DNSServer is built into ESP32 core (no need to install)

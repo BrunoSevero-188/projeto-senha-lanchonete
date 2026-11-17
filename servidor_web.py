@@ -1,71 +1,111 @@
 #!/usr/bin/env python3
-"""
-Servidor HTTP para o Painel de Senhas (versão standalone)
-Mostra localhost e IP da rede para acesso de outros dispositivos na mesma WiFi.
-"""
-import http.server
-import socketserver
+"""Servidor web e API local do painel de senhas."""
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+from urllib.parse import urlparse
+import json
 import socket
-import os
-import sys
 
-PORT = 8080
-DIRECTORY = os.path.dirname(os.path.abspath(__file__))
+PASTA = Path(__file__).resolve().parent
+PORTA = 8080
+ESTADO = {"senha": "", "horario": "", "historico": [], "atualizado": False}
+PROXIMA = 1
 
-class Handler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=DIRECTORY, **kwargs)
-
-    def log_message(self, format, *args):
-        # Log mais limpo
-        sys.stderr.write(f"[{self.address_string()}] {format % args}\n")
-
-def get_lan_ip():
-    """Obtém o IP local da máquina na rede."""
+def ip_rede():
     try:
-        # Cria socket UDP para descobrir IP de saída
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
         return "127.0.0.1"
 
-def main():
-    os.chdir(DIRECTORY)
+class Handler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(PASTA), **kwargs)
 
-    # Verifica se os arquivos existem (renomeados)
-    required = ['index.html', 'script.js', 'style.css']
-    missing = [f for f in required if not os.path.exists(f)]
-    if missing:
-        print("⚠️  Arquivos não encontrados. Renomeie primeiro:")
-        print("   ren index.txt index.html")
-        print("   ren script.txt script.js")
-        print("   ren style.txt style.css")
-        return
+    def log_message(self, formato, *args):
+        print(f"[HTTP] {self.address_string()} - {formato % args}")
 
-    lan_ip = get_lan_ip()
+    def enviar_json(self, dados, status=200):
+        corpo = json.dumps(dados, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(corpo)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(corpo)
 
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print("=" * 60)
-        print("🌐  PAINEL DE SENHAS - Servidor Web Standalone")
-        print("=" * 60)
-        print(f"📁 Diretório: {DIRECTORY}")
-        print(f"🔌 Porta: {PORT}")
-        print("-" * 60)
-        print(f"💻  Acesso LOCAL:     http://localhost:{PORT}/")
-        print(f"📱  Acesso REDE (LAN): http://{lan_ip}:{PORT}/")
-        print("-" * 60)
-        print("💡 Use o IP da LAN para acessar de outro dispositivo")
-        print("   conectado na MESMA WiFi do ESP32.")
-        print("=" * 60)
-        print("Pressione Ctrl+C para parar.\n")
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
+    def do_GET(self):
+        caminho = urlparse(self.path).path
+        if caminho == "/api/senha":
+            self.enviar_json(ESTADO.copy())
+            return
+        super().do_GET()
+
+    def do_POST(self):
+        global PROXIMA
+        caminho = urlparse(self.path).path
+        tamanho = int(self.headers.get("Content-Length", "0"))
         try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\n🛑 Servidor encerrado.")
+            dados = json.loads(self.rfile.read(tamanho) or b"{}")
+        except (json.JSONDecodeError, ValueError):
+            self.enviar_json({"erro": "JSON inválido"}, 400)
+            return
+
+        if caminho == "/api/chamar":
+            senha = dados.get("senha")
+            if senha is None:
+                senha = PROXIMA
+                PROXIMA = PROXIMA + 1 if PROXIMA < 9999 else 1
+            try:
+                numero = int(senha)
+                if not 1 <= numero <= 9999:
+                    raise ValueError
+            except (TypeError, ValueError):
+                self.enviar_json({"erro": "A senha deve ser um número entre 1 e 9999"}, 400)
+                return
+            if ESTADO["senha"]:
+                ESTADO["historico"].insert(0, {
+                    "senha": ESTADO["senha"], "horario": ESTADO["horario"]
+                })
+                ESTADO["historico"] = ESTADO["historico"][:5]
+            from datetime import datetime
+            ESTADO.update({
+                "senha": f"{numero:04d}",
+                "horario": datetime.now().strftime("%H:%M:%S"),
+                "atualizado": True
+            })
+            self.enviar_json(ESTADO.copy())
+            ESTADO["atualizado"] = False
+            return
+
+        if caminho == "/api/reset":
+            ESTADO.update({"senha": "", "horario": "", "historico": [], "atualizado": False})
+            PROXIMA = 1
+            self.enviar_json(ESTADO.copy())
+            return
+
+        self.enviar_json({"erro": "Endpoint não encontrado"}, 404)
 
 if __name__ == "__main__":
-    main()
+    servidor = ThreadingHTTPServer(("0.0.0.0", PORTA), Handler)
+    print("=" * 54)
+    print(" PAINEL DE SENHAS - SERVIDOR LOCAL")
+    print(f" Neste computador: http://localhost:{PORTA}")
+    print(f" Na rede Wi-Fi:    http://{ip_rede()}:{PORTA}")
+    print(" Para encerrar: Ctrl+C")
+    print("=" * 54)
+    try:
+        servidor.serve_forever()
+    except KeyboardInterrupt:
+        print("\nServidor encerrado.")
+    finally:
+        servidor.server_close()
