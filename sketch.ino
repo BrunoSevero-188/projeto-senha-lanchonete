@@ -1,4 +1,5 @@
 #include <WiFi.h>
+#include <WebServer.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <SPI.h>
@@ -15,12 +16,10 @@ const char* WIFI_SSID = "Wokwi-GUEST";
 const char* WIFI_PASSWORD = "";
 
 // ============================================================
-// CONFIGURAÇÃO MQTT
+// CONFIGURAÇÃO MQTT (opcional - para acesso remoto)
 // ============================================================
 const char* MQTT_HOST = "broker.emqx.io";
 const uint16_t MQTT_PORT = 1883;
-
-// Tópicos únicos para este dispositivo (mude o sufixo se compartilhar)
 const char* TOPICO_ESTADO   = "lanchonete/senhas/brunosevero-7f3a9c/estado";
 const char* TOPICO_COMANDO  = "lanchonete/senhas/brunosevero-7f3a9c/comando";
 const char* TOPICO_STATUS   = "lanchonete/senhas/brunosevero-7f3a9c/status";
@@ -29,6 +28,11 @@ WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
 unsigned long ultimaTentativaWiFi = 0;
 unsigned long ultimaTentativaMQTT = 0;
+
+// ============================================================
+// SERVIDOR WEB LOCAL (painel acessível via http://IP_DO_ESP32)
+// ============================================================
+WebServer server(80);
 
 // ============================================================
 // PINOS (conforme diagram.json)
@@ -73,6 +77,7 @@ String horariosHistorico[5];      // Horários do histórico
 bool wifiConectado = false;
 bool mqttConectado = false;
 unsigned long ultimoLoopMQTT = 0;
+unsigned long ultimaAtualizacaoWeb = 0;
 
 // ============================================================
 // CORES DO DISPLAY
@@ -88,10 +93,171 @@ unsigned long ultimoLoopMQTT = 0;
 #define COR_LARANJA     tela.color565(255, 150, 0)
 
 // ============================================================
+// HTML DO PAINEL WEB (armazenado em PROGMEM)
+// ============================================================
+const char HTML_PAINEL[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Painel de Senhas - Lanchonete</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0d1b2a;--panel:#1b2a4a;--accent:#ffd60a;--green:#00e676;--red:#ff4444;--text:#fff;--border:#2d4466;--muted:#888}
+body{min-height:100vh;background:var(--bg);color:var(--text);font-family:system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;padding:20px}
+.container{width:100%;max-width:600px}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;padding:15px;background:var(--panel);border:1px solid var(--border);border-radius:12px}
+.header h1{font-size:22px;color:var(--accent)}
+.status{display:flex;align-items:center;gap:8px;font-size:14px}
+.dot{width:10px;height:10px;border-radius:50%}
+.dot.online{background:var(--green)} .dot.offline{background:var(--red)} .dot.mqtt{background:var(--accent)}
+.main{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:25px;box-shadow:0 10px 40px rgba(0,0,0,.3)}
+.current{text-align:center;margin-bottom:25px}
+.label{font-size:14px;color:var(--muted);font-weight:bold;letter-spacing:2px;margin-bottom:8px}
+.number{font-size:clamp(80px,18vw,120px);font-weight:900;font-family:monospace;color:var(--accent);line-height:1}
+.time{font-size:14px;color:var(--muted);margin-top:8px;font-family:monospace}
+.controls{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:25px}
+.btn{padding:18px;border:0;border-radius:10px;font-size:16px;font-weight:bold;cursor:pointer;transition:filter .2s}
+.btn:hover{filter:brightness(1.1)} .btn:active{transform:scale(.98)}
+.btn-primary{background:var(--accent);color:#0d1b2a}
+.btn-danger{background:var(--red);color:#fff}
+.btn-success{background:var(--green);color:#0d1b2a}
+.history{margin-top:10px}
+.history h3{font-size:16px;margin-bottom:12px;color:var(--accent)}
+.history-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:10px}
+.history-item{background:#14253d;border:1px solid var(--border);border-radius:10px;padding:15px;text-align:center}
+.history-num{font-size:28px;font-weight:bold;font-family:monospace;color:var(--accent)}
+.history-time{font-size:11px;color:var(--muted);margin-top:4px;font-family:monospace}
+.empty{grid-column:1/-1;color:var(--muted);padding:20px;text-align:center}
+.footer{margin-top:20px;text-align:center;font-size:12px;color:var(--muted)}
+input[type="number"]{width:100%;padding:12px;border:1px solid var(--border);border-radius:8px;background:#14253d;color:var(--text);font-size:16px;text-align:center}
+.input-group{display:flex;gap:8px;margin-bottom:15px}
+</style>
+</head>
+<body>
+<div class="container">
+<header class="header">
+<h1>🍔 Painel de Senhas</h1>
+<div class="status">
+<span class="dot" id="wifiDot"></span>
+<span id="wifiStatus">WiFi</span>
+<span class="dot" id="mqttDot"></span>
+<span id="mqttStatus">MQTT</span>
+</div>
+</header>
+<main class="main">
+<section class="current">
+<div class="label">SENHA CHAMADA</div>
+<div id="number" class="number">----</div>
+<div id="time" class="time">Aguardando...</div>
+</section>
+<div class="controls">
+<button class="btn btn-success" onclick="chamarProxima()">➕ Próxima</button>
+<button class="btn btn-primary" onclick="promptSenha()">🔢 Chamar Nº</button>
+<button class="btn btn-danger" onclick="limparPainel()">🗑️ Limpar Tudo</button>
+<button class="btn btn-primary" onclick="sincronizar()">🔄 Sincronizar</button>
+</div>
+<div class="input-group" style="display:none" id="inputGroup">
+<input type="number" id="senhaInput" min="1" max="9999" placeholder="Número da senha (1-9999)">
+<button class="btn btn-success" onclick="chamarManual()">Confirmar</button>
+<button class="btn" style="background:var(--muted)" onclick="document.getElementById('inputGroup').style.display='none'">Cancelar</button>
+</div>
+<section class="history">
+<h3>📜 Últimas 5 Chamadas</h3>
+<div id="history" class="history-list"><div class="empty">Nenhuma senha chamada ainda</div></div>
+</section>
+</main>
+<div class="footer">ESP32 Painel Local • <span id="ipDisplay"></span></div>
+</div>
+<script>
+// Configuração - detecta automaticamente se está no ESP32 ou externo
+const API_BASE = window.location.origin;
+let ws = null;
+
+async function fetchJSON(path, options = {}) {
+  try {
+    const r = await fetch(API_BASE + path, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers||{}) } });
+    return await r.json();
+  } catch (e) { console.error('Erro API:', e); return null; }
+}
+
+function updateStatus(dotId, textId, online, label) {
+  const dot = document.getElementById(dotId);
+  const txt = document.getElementById(textId);
+  dot.className = 'dot ' + (online ? 'online' : 'offline');
+  txt.textContent = label + ': ' + (online ? 'OK' : '--');
+}
+
+async function carregarEstado() {
+  const d = await fetchJSON('/api/estado');
+  if (!d) return;
+
+  document.getElementById('number').textContent = d.senha || '----';
+  document.getElementById('time').textContent = d.senha ? 'Chamada: ' + d.horario : 'Aguardando...';
+
+  updateStatus('wifiDot', 'wifiStatus', d.wifi, 'WiFi');
+  updateStatus('mqttDot', 'mqttStatus', d.mqtt, 'MQTT');
+
+  const hist = document.getElementById('history');
+  if (!d.historico || d.historico.length === 0) {
+    hist.innerHTML = '<div class="empty">Nenhuma senha chamada ainda</div>';
+    return;
+  }
+  hist.innerHTML = '';
+  d.historico.forEach(h => {
+    const div = document.createElement('div');
+    div.className = 'history-item';
+    div.innerHTML = '<div class="history-num">' + h.senha + '</div><div class="history-time">' + h.horario + '</div>';
+    hist.appendChild(div);
+  });
+}
+
+async function chamarProxima() {
+  await fetchJSON('/api/proxima', { method: 'POST' });
+  await carregarEstado();
+}
+
+function promptSenha() {
+  document.getElementById('inputGroup').style.display = 'flex';
+  document.getElementById('senhaInput').focus();
+}
+
+async function chamarManual() {
+  const val = document.getElementById('senhaInput').value;
+  if (!val) return alert('Digite um número');
+  await fetchJSON('/api/chamar', { method: 'POST', body: JSON.stringify({ senha: val }) });
+  document.getElementById('inputGroup').style.display = 'none';
+  document.getElementById('senhaInput').value = '';
+  await carregarEstado();
+}
+
+async function limparPainel() {
+  if (!confirm('Limpar painel e histórico?')) return;
+  await fetchJSON('/api/limpar', { method: 'POST' });
+  await carregarEstado();
+}
+
+async function sincronizar() {
+  await fetchJSON('/api/sincronizar', { method: 'POST' });
+  await carregarEstado();
+}
+
+// Auto-refresh a cada 2s
+setInterval(carregarEstado, 2000);
+carregarEstado();
+
+// Mostra IP local
+document.getElementById('ipDisplay').textContent = API_BASE;
+</script>
+</body>
+</html>
+)rawliteral";
+
+// ============================================================
 // FUNÇÕES AUXILIARES
 // ============================================================
 String horarioAtual() {
-  // Tempo relativo desde boot. Para horário real, adicione NTP/RTC.
   unsigned long segs = millis() / 1000;
   unsigned long h = (segs / 3600) % 24;
   unsigned long m = (segs % 3600) / 60;
@@ -148,7 +314,6 @@ void desenharCabecalho() {
   tela.fillRect(0, 0, 320, 48, COR_PAINEL);
   tela.drawFastHLine(0, 48, 320, COR_CINZA);
 
-  // Título
   tela.setTextColor(COR_CIANO);
   tela.setTextSize(2);
   tela.setCursor(10, 10);
@@ -175,20 +340,19 @@ void desenharCabecalho() {
     tela.print("MQTT: --");
   }
 
-  // IP ou modo AP
+  // IP + Web Server
   tela.setCursor(10, 30);
   tela.setTextColor(COR_CINZA);
   tela.setTextSize(1);
   if (wifiConectado) {
-    tela.print("IP: ");
+    tela.print("Web: http://");
     tela.print(WiFi.localIP().toString());
   } else {
-    tela.print("Aguardando conexao...");
+    tela.print("Aguardando conexao WiFi...");
   }
 }
 
 void desenharSenhaAtual() {
-  // Painel da senha atual
   tela.fillRoundRect(10, 60, 300, 90, 8, COR_PAINEL);
   tela.drawRoundRect(10, 60, 300, 90, 8, COR_CINZA);
 
@@ -197,7 +361,6 @@ void desenharSenhaAtual() {
   tela.setCursor(20, 70);
   tela.print("SENHA ATUAL");
 
-  // Número grande centralizado
   tela.setTextColor(COR_DESTAQUE);
   tela.setTextSize(5);
   String exibir = senhaAtual.length() ? senhaAtual : "----";
@@ -208,7 +371,6 @@ void desenharSenhaAtual() {
   tela.setCursor(x, 95);
   tela.print(exibir);
 
-  // Horário
   if (horarioSenhaAtual.length()) {
     tela.setTextColor(COR_CINZA);
     tela.setTextSize(1);
@@ -219,7 +381,6 @@ void desenharSenhaAtual() {
 }
 
 void desenharEntrada() {
-  // Painel de digitação manual
   tela.fillRoundRect(10, 160, 300, 55, 8, COR_PAINEL);
   tela.drawRoundRect(10, 160, 300, 55, 8, COR_CINZA);
 
@@ -228,7 +389,6 @@ void desenharEntrada() {
   tela.setCursor(20, 170);
   tela.print("DIGITE SENHA: ");
 
-  // Mostra dígitos com placeholder _
   String mostrar = "";
   for (int i = 0; i < 4; i++) {
     if (i < entrada.length()) mostrar += entrada[i];
@@ -242,7 +402,6 @@ void desenharEntrada() {
 }
 
 void desenharHistorico() {
-  // Painel do histórico (últimas 3 na tela)
   tela.fillRoundRect(10, 225, 300, 95, 8, COR_PAINEL);
   tela.drawRoundRect(10, 225, 300, 95, 8, COR_CINZA);
 
@@ -252,7 +411,7 @@ void desenharHistorico() {
   tela.print("ULTIMAS 5 CHAMADAS:");
 
   int y = 248;
-  for (int i = 0; i < 3; i++) {  // Mostra 3 na tela (cabe 5 no array)
+  for (int i = 0; i < 3; i++) {
     if (historico[i].length()) {
       tela.setTextColor(COR_BRANCO);
       tela.setTextSize(2);
@@ -266,7 +425,6 @@ void desenharHistorico() {
     }
   }
 
-  // Indica se há mais no histórico
   if (historico[3].length() || historico[4].length()) {
     tela.setTextColor(COR_CINZA);
     tela.setTextSize(1);
@@ -276,7 +434,6 @@ void desenharHistorico() {
 }
 
 void desenharBotoes() {
-  // Legenda dos botões na parte inferior
   tela.fillRect(0, 280, 320, 40, COR_PAINEL);
   tela.drawFastHLine(0, 280, 320, COR_CINZA);
 
@@ -287,7 +444,6 @@ void desenharBotoes() {
   tela.setCursor(10, 300);
   tela.print("[*] Apagar    [#] Confirmar");
 
-  // Status da entrada
   if (entrada.length()) {
     tela.setTextColor(COR_DESTAQUE);
     tela.setCursor(200, 286);
@@ -304,7 +460,6 @@ void desenharTelaCompleta(const String& mensagem = "") {
   desenharHistorico();
   desenharBotoes();
 
-  // Mensagem temporária centralizada
   if (mensagem.length()) {
     tela.fillRoundRect(30, 120, 260, 35, 6, tela.color565(0, 0, 80));
     tela.setTextColor(COR_BRANCO);
@@ -343,17 +498,14 @@ void desenharTelaSimples(const String& titulo, const String& msg, uint16_t corFu
 }
 
 // ============================================================
-// MQTT - PUBLICAR ESTADO
+// SERIALIZAR ESTADO PARA JSON (usado por Web e MQTT)
 // ============================================================
-void publicarEstado() {
-  if (!mqttConectado) return;
-
-  StaticJsonDocument<768> doc;
-  doc["tipo"] = "estado";
+void serializarEstado(JsonDocument& doc) {
   doc["senha"] = senhaAtual;
   doc["horario"] = horarioSenhaAtual;
   doc["wifi"] = wifiConectado;
   doc["mqtt"] = mqttConectado;
+  doc["ip"] = wifiConectado ? WiFi.localIP().toString() : "";
 
   JsonArray lista = doc.createNestedArray("historico");
   for (int i = 0; i < 5; i++) {
@@ -363,51 +515,40 @@ void publicarEstado() {
       item["horario"] = horariosHistorico[i];
     }
   }
+}
+
+// ============================================================
+// MQTT - PUBLICAR ESTADO
+// ============================================================
+void publicarEstado() {
+  if (!mqttConectado) return;
+
+  StaticJsonDocument<768> doc;
+  doc["tipo"] = "estado";
+  serializarEstado(doc);
 
   char payload[768];
   size_t tamanho = serializeJson(doc, payload, sizeof(payload));
   mqtt.publish(TOPICO_ESTADO, reinterpret_cast<const uint8_t*>(payload), tamanho, true);
-
   Serial.print("[MQTT] Estado publicado: ");
   Serial.println(payload);
 }
 
 // ============================================================
-// LÓGICA DE SENHAS
+// LÓGICA DE SENHAS (comum: teclado, web, MQTT)
 // ============================================================
-void chamarSenha(String numero, bool publicar = true) {
+void executarChamada(String numero) {
   numero.trim();
-  if (numero.length() == 0) {
-    bipErro();
-    desenharTelaCompleta("Digite uma senha");
-    delay(800);
-    desenharTelaCompleta();
-    return;
-  }
+  if (numero.length() == 0) return;
 
   int valor = numero.toInt();
-  if (valor < 1 || valor > 9999) {
-    ledErro(true);
-    bipErro();
-    desenharTelaSimples("ERRO", "Senha invalida\n(1-9999)", COR_VERMELHO);
-    delay(1200);
-    ledErro(false);
-    desenharTelaCompleta();
-    return;
-  }
+  if (valor < 1 || valor > 9999) return;
 
   char formatada[5];
   snprintf(formatada, sizeof(formatada), "%04d", valor);
   String novaSenha = String(formatada);
 
-  if (novaSenha == senhaAtual) {
-    entrada = "";
-    bipTecla();
-    desenharTelaCompleta("Senha ja chamada");
-    delay(800);
-    desenharTelaCompleta();
-    return;
-  }
+  if (novaSenha == senhaAtual) return;
 
   // Move atual para histórico
   if (senhaAtual.length()) {
@@ -432,16 +573,20 @@ void chamarSenha(String numero, bool publicar = true) {
   Serial.println("[SENHA] Chamada: " + senhaAtual);
 
   delay(1500);
-  ledSucesso(false);  // Pisca e apaga
+  ledSucesso(false);
 
-  if (publicar) publicarEstado();
+  publicarEstado();
   desenharTelaCompleta();
+}
+
+void chamarSenha(String numero, bool publicar = true) {
+  executarChamada(numero);
 }
 
 void proximaSenha(bool publicar = true) {
   int proxima = senhaAtual.length() ? senhaAtual.toInt() + 1 : 1;
   if (proxima > 9999) proxima = 1;
-  chamarSenha(String(proxima), publicar);
+  executarChamada(String(proxima));
 }
 
 void limparPainel(bool publicar = true) {
@@ -475,7 +620,51 @@ void apagarUltimoDigito() {
 }
 
 // ============================================================
-// MQTT - PROCESSAR COMANDOS RECEBIDOS (do painel web)
+// SERVIDOR WEB - ROTAS
+// ============================================================
+void handleRoot() {
+  server.send_P(200, "text/html; charset=utf-8", HTML_PAINEL);
+}
+
+void handleAPIEstado() {
+  StaticJsonDocument<768> doc;
+  serializarEstado(doc);
+  String resp;
+  serializeJson(doc, resp);
+  server.send(200, "application/json", resp);
+}
+
+void handleAPIChamar() {
+  if (server.hasArg("plain")) {
+    StaticJsonDocument<128> doc;
+    deserializeJson(doc, server.arg("plain"));
+    const char* num = doc["senha"] | "";
+    if (strlen(num) > 0) executarChamada(String(num));
+  }
+  handleAPIEstado();
+}
+
+void handleAPIProxima() {
+  proximaSenha();
+  handleAPIEstado();
+}
+
+void handleAPILimpar() {
+  limparPainel();
+  handleAPIEstado();
+}
+
+void handleAPISincronizar() {
+  publicarEstado();
+  handleAPIEstado();
+}
+
+void handleNotFound() {
+  server.send(404, "application/json", "{\"erro\":\"Nao encontrado\"}");
+}
+
+// ============================================================
+// MQTT - PROCESSAR COMANDOS RECEBIDOS
 // ============================================================
 void processarComando(char* payload, unsigned int length) {
   StaticJsonDocument<256> doc;
@@ -486,7 +675,7 @@ void processarComando(char* payload, unsigned int length) {
   }
 
   const char* acao = doc["acao"] | "";
-  Serial.print("[MQTT] Comando recebido: ");
+  Serial.print("[MQTT] Comando: ");
   Serial.println(acao);
 
   if (strcmp(acao, "proxima") == 0) {
@@ -519,6 +708,8 @@ void conectarWiFi() {
       wifiConectado = true;
       Serial.print("[WiFi] Conectado! IP: ");
       Serial.println(WiFi.localIP());
+      Serial.print("[Web] Painel disponivel em: http://");
+      Serial.println(WiFi.localIP().toString());
       desenharTelaCompleta();
     }
     return;
@@ -568,7 +759,7 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
-  Serial.println("\n=== PAINEL DE SENHAS - ESP32 + ILI9341 + MQTT ===");
+  Serial.println("\n=== PAINEL DE SENHAS - ESP32 + ILI9341 + Web + MQTT ===");
   Serial.println("Teclas: [0-9] Digitar | [*] Apagar | [#] Confirmar");
   Serial.println("        [A] Proxima  | [B] Limpar Tudo");
   Serial.println("LEDs:   Verde = Sucesso | Vermelho = Limpar/Erro");
@@ -582,7 +773,7 @@ void setup() {
   // Inicializa TFT
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
   tela.begin();
-  tela.setRotation(1);  // Landscape
+  tela.setRotation(1);
   tela.fillScreen(COR_FUNDO);
 
   // Splash
@@ -596,9 +787,20 @@ void setup() {
   tela.print("ILI9341 320x240");
   tela.setTextColor(COR_CINZA);
   tela.setTextSize(1);
-  tela.setCursor(60, 200);
-  tela.print("Conectando WiFi/MQTT...");
+  tela.setCursor(40, 200);
+  tela.print("Iniciando WiFi + Web Server...");
   delay(1500);
+
+  // Servidor Web Local
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/estado", HTTP_GET, handleAPIEstado);
+  server.on("/api/chamar", HTTP_POST, handleAPIChamar);
+  server.on("/api/proxima", HTTP_POST, handleAPIProxima);
+  server.on("/api/limpar", HTTP_POST, handleAPILimpar);
+  server.on("/api/sincronizar", HTTP_POST, handleAPISincronizar);
+  server.onNotFound(handleNotFound);
+  server.begin();
+  Serial.println("[Web] Servidor iniciado na porta 80");
 
   // MQTT
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
@@ -612,16 +814,18 @@ void setup() {
 // LOOP PRINCIPAL
 // ============================================================
 void loop() {
+  // Servidor Web (prioridade alta - resposta rápida)
+  server.handleClient();
+
   // Reconexão WiFi
   conectarWiFi();
 
   // Reconexão MQTT
   if (wifiConectado) conectarMQTT();
 
-  // Loop MQTT (processa mensagens recebidas)
+  // Loop MQTT
   if (mqttConectado) {
     mqtt.loop();
-    // Verifica se desconectou
     if (!mqtt.connected()) {
       mqttConectado = false;
       desenharTelaCompleta();
@@ -644,40 +848,34 @@ void loop() {
   if (tecla) {
     Serial.printf("[TECLA] %c\n", tecla);
 
-    // Dígitos 0-9: adiciona à entrada (máx 4)
     if (tecla >= '0' && tecla <= '9') {
       if (entrada.length() < 4) {
         entrada += tecla;
         bipTecla();
         desenharTelaCompleta();
       } else {
-        bipErro();  // Limite atingido
+        bipErro();
       }
     }
-    // * : Apaga último dígito
     else if (tecla == '*') {
       apagarUltimoDigito();
     }
-    // # : Confirma/Chama a senha digitada
     else if (tecla == '#') {
-      chamarSenha(entrada);
+      if (entrada.length()) chamarSenha(entrada);
+      else { bipErro(); desenharTelaCompleta("Digite uma senha"); delay(800); desenharTelaCompleta(); }
     }
-    // A : Próxima senha automática (incrementa)
     else if (tecla == 'A') {
       proximaSenha();
     }
-    // B : Limpa tudo (painel + histórico)
     else if (tecla == 'B') {
       limparPainel();
     }
-    // D : (reservado) - pode usar para modo config WiFi
     else if (tecla == 'D') {
       bipTecla();
       desenharTelaCompleta("Use # para confirmar");
       delay(800);
       desenharTelaCompleta();
     }
-    // C : (reservado)
     else if (tecla == 'C') {
       bipTecla();
     }

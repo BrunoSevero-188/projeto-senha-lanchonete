@@ -4,3 +4,4 @@ Adafruit ILI9341
 Adafruit GFX Library
 PubSubClient
 ArduinoJson
+# WebServer e WiFi são built-in no ESP32 core
